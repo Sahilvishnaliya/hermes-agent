@@ -132,6 +132,7 @@ def _cua_driver_supports_no_overlay(driver_cmd: str) -> bool:
         cmd = resolve_cua_driver_cmd() or cmd
     try:
         proc = _cb()._run_driver(cmd, "--help", timeout=3.0)
+        return "--no-overlay" in (proc.stdout or "") + (proc.stderr or "")
     except FileNotFoundError:
         logger.warning(
             "cua-driver %r not found while probing --no-overlay support; "
@@ -142,7 +143,6 @@ def _cua_driver_supports_no_overlay(driver_cmd: str) -> bool:
             "cua-driver --help probe failed (%s); cannot confirm --no-overlay, "
             "the overlay policy will NOT be applied", exc)
         return False
-    return "--no-overlay" in (proc.stdout or "") + (proc.stderr or "")
 
 def _resolve_mcp_invocation(driver_cmd: str, *, timeout: float = 6.0) -> Tuple[str, List[str]]:
     """``(command, args)`` that spawn cua-driver's stdio MCP server, asked of the driver itself via ``cua-driver
