@@ -1,8 +1,6 @@
-import { runBackendStartStep } from './backend-start-cancellation'
 import type { FirstRunSetupDecision } from './first-run-setup-gate'
 
 export interface PrimaryBackendStartupOptions<Backend, RuntimeBackend, Remote, Connection> {
-  signal?: AbortSignal
   connectRemote: (remote: Remote) => Promise<Connection>
   ensureLocalRuntime: (backend: Backend) => Promise<RuntimeBackend>
   prepareLocalBackend: () => Backend | Promise<Backend>
@@ -22,15 +20,6 @@ interface ResolvedPrimaryRemote {
   remoteHost?: string
   remoteKind?: 'cloud' | 'ssh' | 'url'
   source?: string
-  ssh?: {
-    effectiveConfigFingerprint?: string
-    host?: string
-    keyPath?: string
-    port?: number
-    remoteHermesPath?: string
-    remoteProfile?: string
-    user?: string
-  }
   token: unknown
   wsUrl: string
 }
@@ -54,7 +43,6 @@ export function createPrimaryRemoteConnection<State extends object>(
     remoteKind: remote.remoteKind,
     remoteHermesVersion: remote.remoteHermesVersion,
     ...(remote.connectionId ? { connectionId: remote.connectionId } : {}),
-    ...(remote.ssh ? { ssh: remote.ssh } : {}),
     token: remote.token,
     wsUrl: remote.wsUrl,
     logs,
@@ -82,36 +70,34 @@ export async function runPrimaryBackendStartup<Backend, RuntimeBackend, Remote, 
   prepareLocalBackend,
   resolveRemote,
   waitForDecision,
-  waitForLocalStart,
-  signal
+  waitForLocalStart
 }: PrimaryBackendStartupOptions<Backend, RuntimeBackend, Remote, Connection>): Promise<
   PrimaryBackendStartupResult<RuntimeBackend, Connection>
 > {
-  const step = <T>(run: () => T | Promise<T>) => runBackendStartStep(signal, run)
-  const savedRemote = await step(resolveRemote)
+  const savedRemote = await resolveRemote()
 
   if (savedRemote) {
-    return { kind: 'remote', connection: await step(() => connectRemote(savedRemote)) }
+    return { kind: 'remote', connection: await connectRemote(savedRemote) }
   }
 
-  await step(waitForLocalStart)
+  await waitForLocalStart()
 
-  const backend = await step(prepareLocalBackend)
-  const decision = await step(() => waitForDecision(backend))
+  const backend = await prepareLocalBackend()
+  const decision = await waitForDecision(backend)
 
   if (decision === 'remote-applied') {
-    const appliedRemote = await step(resolveRemote)
+    const appliedRemote = await resolveRemote()
 
     if (!appliedRemote) {
       throw new Error('First-run remote setup completed without a saved remote backend.')
     }
 
-    return { kind: 'remote', connection: await step(() => connectRemote(appliedRemote)) }
+    return { kind: 'remote', connection: await connectRemote(appliedRemote) }
   }
 
   if (decision === 'reset') {
     throw new FirstRunSetupResetError()
   }
 
-  return { kind: 'local', backend: await step(() => ensureLocalRuntime(backend)) }
+  return { kind: 'local', backend: await ensureLocalRuntime(backend) }
 }

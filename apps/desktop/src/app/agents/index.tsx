@@ -1,4 +1,3 @@
-import { compactNumber } from '@hermes/shared'
 import { useStore } from '@nanostores/react'
 import { type ReactNode, useEffect, useMemo, useState } from 'react'
 
@@ -9,6 +8,7 @@ import { Codicon } from '@/components/ui/codicon'
 import { FadeText } from '@/components/ui/fade-text'
 import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { type Translations, useI18n } from '@/i18n'
+import { compactNumber } from '@/lib/format'
 import { AlertCircle, CheckCircle2 } from '@/lib/icons'
 import { useEnterAnimation } from '@/lib/use-enter-animation'
 import { cn } from '@/lib/utils'
@@ -152,36 +152,10 @@ function groupDelegations(roots: readonly SubagentNode[]): RootGroup[] {
   let n = 0
 
   for (const node of roots) {
-    // Exact grouping when the backend tags workers with their batch id —
-    // concurrent or nested fan-outs of the same shape must not merge.
-    if (node.delegationId) {
-      const byId = groups.find(g => g.id === `delegation:${node.delegationId}`)
-
-      if (byId) {
-        byId.nodes.push(node)
-
-        continue
-      }
-
-      n += 1
-      groups.push({
-        id: `delegation:${node.delegationId}`,
-        delegationIndex: n,
-        nodes: [node],
-        taskCount: node.taskCount
-      })
-
-      continue
-    }
-
-    // Older backends (no delegation_id): heuristic grouping by shape + time.
     const prev = groups.at(-1)
     const prevTail = prev?.nodes.at(-1)
     const closeInTime = prevTail ? Math.abs(node.startedAt - prevTail.startedAt) <= 5_000 : false
-
-    const sameShape =
-      prev && !prev.id.startsWith('delegation:') && node.taskCount > 1 && prev.taskCount === node.taskCount
-
+    const sameShape = prev && node.taskCount > 1 && prev.taskCount === node.taskCount
     const uniqueStep = prev ? !prev.nodes.some(item => item.taskIndex === node.taskIndex) : false
 
     if (prev && sameShape && closeInTime && uniqueStep) {
@@ -320,10 +294,10 @@ function StreamLine({
   )
 }
 
-export function SubagentRow({ node, depth = 0, nowMs }: { node: SubagentNode; depth?: number; nowMs: number }) {
+function SubagentRow({ node, depth = 0, nowMs }: { node: SubagentNode; depth?: number; nowMs: number }) {
   const { t } = useI18n()
   const running = node.status === 'running' || node.status === 'queued'
-  const elapsed = useElapsedSeconds(running, `subagent:${node.id}`, node.startedAt)
+  const elapsed = useElapsedSeconds(running, `subagent:${node.id}`)
 
   const durationSeconds =
     typeof node.durationSeconds === 'number' ? Math.max(0, Math.round(node.durationSeconds)) : elapsed

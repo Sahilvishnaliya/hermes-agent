@@ -40,13 +40,8 @@ export const UNSCOPED_STREAM_EVENT_TYPES = new Set([
   'thinking.delta',
   'tool.complete',
   'tool.generating',
-  'tool.start',
-  'vault.code.expire',
-  'vault.code.request',
-  'vault.save_login.expire',
-  'vault.save_login.request',
-  'vault.unlock.expire',
-  'vault.unlock.request'
+  'tool.progress',
+  'tool.start'
 ])
 
 const UNSCOPED_STREAM_END_EVENT_TYPES = new Set(['error', 'message.complete'])
@@ -85,34 +80,20 @@ export interface GatewayEventSessionRoute {
   sessionId: null | string
 }
 
-/** Which session (if any) to re-pull `approval.pending` for after `eventType`.
- *
- *  `gateway.ready` and `session.info` are the two rehydration points. An
- *  UNSCOPED `session.info` (the approvals-loop / broadcast fan-out, no
- *  `session_id` on the frame) reaches here attributed to the active session by
- *  the routing fallback; when `isGone(activeSessionId)` — the gateway already
- *  answered 4001 for that runtime — replaying would only re-send the dead id
- *  on every fan-out tick (#100639), so return null. A frame that names the
- *  session explicitly is the runtime speaking for itself and is never gone. */
 export function approvalReplaySessionId(
   eventType: string | undefined,
   activeSessionId: null | string,
-  routedSessionId: null | string,
-  options?: { explicit?: boolean; isGone?: (sessionId: string) => boolean }
+  routedSessionId: null | string
 ): null | string {
-  let target: null | string = null
-
   if (eventType === 'gateway.ready') {
-    target = activeSessionId
-  } else if (eventType === 'session.info') {
-    target = routedSessionId
+    return activeSessionId
   }
 
-  if (target && !options?.explicit && options?.isGone?.(target)) {
-    return null
+  if (eventType === 'session.info') {
+    return routedSessionId
   }
 
-  return target
+  return null
 }
 
 /**

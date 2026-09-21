@@ -1,40 +1,38 @@
-import type { ModelCapabilities, ModelOptionProvider, ModelOptionsResult } from '@hermes/shared'
+import { getGlobalModelOptions, type HermesGateway, type ModelOptionsResponse } from '@/hermes'
+import type { ModelOptionProvider } from '@/types/hermes'
 
-import { getGlobalModelOptions, type HermesGateway } from '@/hermes'
-
-type CatalogProviderIdentity = Pick<ModelOptionProvider, 'aliases' | 'name' | 'slug'>
-
-/** True when `currentProvider` is this catalog row — slug, display name, or
- *  a custom-provider alias (`custom:<key>` vs the bare config key, #87035). */
-export function catalogProviderMatches(provider: CatalogProviderIdentity, currentProvider: string): boolean {
-  if (!currentProvider) {
+/**
+ * True only when a persisted **manual** composer pick has been removed from the
+ * catalog (its provider still ships models, but no longer this one) — so a new
+ * chat would keep 404'ing the dead model. Deliberately conservative to never
+ * clobber a still-valid pick: an unknown/absent provider, an empty model list
+ * (re-auth / unconfigured), or a not-yet-loaded catalog all return false.
+ */
+export function manualPickRemoved(
+  providers: ModelOptionProvider[] | undefined,
+  provider: string,
+  model: string
+): boolean {
+  if (!providers?.length || !provider || !model) {
     return false
   }
 
-  return (
-    provider.slug === currentProvider ||
-    provider.name === currentProvider ||
-    (provider.aliases?.includes(currentProvider) ?? false)
-  )
-}
+  const row = providers.find(p => p.slug === provider || p.name === provider)
 
-/** The catalog's option support for the current pick, or undefined while the
- *  catalog is loading / doesn't say. Callers treat undefined as "assume
- *  reasoning" so controls never flicker away during the fetch. */
-export function currentModelCapabilities(
-  options: ModelOptionsResult | null | undefined,
-  provider: string,
-  model: string
-): ModelCapabilities | undefined {
-  return options?.providers?.find(row => catalogProviderMatches(row, provider))?.capabilities?.[model]
-}
+  if (!row) {
+    return false
+  }
 
-// A picked (provider, model) pair is never retargeted from catalog membership.
-// Picker rows are hints (discovered / curated / capped lists); a custom endpoint
-// or a newer release legitimately serves ids the row lacks, and the backend
-// soft-accepts them. Diffing the pick against the catalog silently swapped
-// `deepseek-v4.1-flash` for the row's `-0731` sibling. The only authority on a
-// pick's validity is the gateway's switch result.
+  const models = row.models ?? []
+
+  // Empty list means the provider is present but unconfigured / awaiting
+  // re-auth, not that the model was dropped — leave the pick alone.
+  if (models.length === 0) {
+    return false
+  }
+
+  return !models.includes(model)
+}
 
 interface ModelOptionsRequest {
   /** When false, include ambient/unconfigured providers (onboarding/setup
@@ -42,54 +40,27 @@ interface ModelOptionsRequest {
    *  providers are listed (#56974). */
   explicitOnly?: boolean
   gateway?: HermesGateway
-  /** Owner-routed RPC. When set, catalog reads hit this dispatcher instead of
-   *  `gateway.request` — a tile's model menu must not query the ambient
-   *  chrome socket (#93892). */
-  request?: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
-  /** Profile for the REST recovery path. Must match the catalog owner so a
-   *  secondary tile does not fall back to the launch profile's models. */
-  profile?: null | string
   refresh?: boolean
   sessionId?: null | string
 }
 
-export function modelOptionsQueryKey(
-  profile: null | string | undefined,
-  sessionId?: null | string,
-  ownerConnectionId?: null | string
-) {
+export function modelOptionsQueryKey(profile: null | string | undefined, sessionId?: null | string) {
   const profileKey = (profile ?? '').trim() || 'default'
-  const ownerKey = (ownerConnectionId ?? '').trim()
 
-  return ['model-options', profileKey, sessionId || 'global', ...(ownerKey ? ['owner', ownerKey] : [])] as const
+  return ['model-options', profileKey, sessionId || 'global'] as const
 }
 
-function hasSelectableModels(options: ModelOptionsResult | null | undefined): boolean {
+function hasSelectableModels(options: ModelOptionsResponse | null | undefined): boolean {
   return options?.providers?.some(provider => (provider.models?.length ?? 0) > 0) ?? false
-}
-
-function restModelOptions(
-  explicitOnly: boolean,
-  refresh: boolean,
-  profile?: null | string
-): Promise<ModelOptionsResult> {
-  const opts = { explicitOnly, ...(refresh ? { refresh: true } : {}) }
-  const profileKey = (profile ?? '').trim()
-
-  return profileKey ? getGlobalModelOptions(opts, profileKey) : getGlobalModelOptions(opts)
 }
 
 export async function requestModelOptions({
   explicitOnly = true,
   gateway,
-  profile,
   refresh = false,
-  request,
   sessionId
-}: ModelOptionsRequest): Promise<ModelOptionsResult> {
-  const dispatch = request ?? (gateway ? gateway.request.bind(gateway) : null)
-
-  if (dispatch) {
+}: ModelOptionsRequest): Promise<ModelOptionsResponse> {
+  if (gateway) {
     const params: Record<string, unknown> = {}
 
     if (sessionId) {
@@ -104,17 +75,11 @@ export async function requestModelOptions({
       params.explicit_only = true
     }
 
-    const profileKey = (profile ?? '').trim()
-
-    if (profileKey) {
-      params.profile = profileKey
-    }
-
     let gatewayError: unknown
-    let gatewayOptions: ModelOptionsResult | undefined
+    let gatewayOptions: ModelOptionsResponse | undefined
 
     try {
-      gatewayOptions = await dispatch<ModelOptionsResult>('model.options', params)
+      gatewayOptions = await gateway.request<ModelOptionsResponse>('model.options', params)
     } catch (error) {
       gatewayError = error
     }
@@ -123,26 +88,23 @@ export async function requestModelOptions({
       return gatewayOptions
     }
 
-    // An owner-routed dispatcher can name a different registry connection than
-    // the ambient REST client. Never recover that request through ambient REST:
-    // profile names are not unique across sources, so doing so can cache B's
-    // catalog under A's tile. Ambient gateway requests retain the compatibility
-    // recovery used by older backends with incomplete model.options responses.
-    if (!request) {
-      try {
-        const restOptions = await restModelOptions(explicitOnly, refresh, profile)
+    // A connected Desktop gateway can occasionally return only the current
+    // provider/model (or an empty provider list) while its authenticated REST
+    // catalog is already populated. Recover through the same profile-scoped
+    // endpoint Settings uses, but keep the live session selection authoritative.
+    try {
+      const restOptions = await getGlobalModelOptions({ explicitOnly, ...(refresh ? { refresh: true } : {}) })
 
-        if (hasSelectableModels(restOptions)) {
-          return {
-            ...restOptions,
-            ...(gatewayOptions?.provider ? { provider: gatewayOptions.provider } : {}),
-            ...(gatewayOptions?.model ? { model: gatewayOptions.model } : {})
-          }
+      if (hasSelectableModels(restOptions)) {
+        return {
+          ...restOptions,
+          ...(gatewayOptions?.provider ? { provider: gatewayOptions.provider } : {}),
+          ...(gatewayOptions?.model ? { model: gatewayOptions.model } : {})
         }
-      } catch {
-        // Preserve the gateway result (or its original error) when the recovery
-        // path is unavailable.
       }
+    } catch {
+      // Preserve the gateway result (or its original error) when the recovery
+      // path is unavailable.
     }
 
     if (gatewayOptions) {
@@ -152,5 +114,5 @@ export async function requestModelOptions({
     throw gatewayError
   }
 
-  return restModelOptions(explicitOnly, refresh, profile)
+  return getGlobalModelOptions({ explicitOnly, ...(refresh ? { refresh: true } : {}) })
 }

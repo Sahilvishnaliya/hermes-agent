@@ -1,5 +1,3 @@
-import { compactNumber } from '@hermes/shared/format'
-
 import { usageBarsText } from '../../../components/overlayPrimitives.js'
 import { introMsg, toTranscriptMessages } from '../../../domain/messages.js'
 import { sessionScopedModelArg, TUI_SESSION_MODEL_FLAG } from '../../../domain/slash.js'
@@ -14,6 +12,7 @@ import type {
   VoiceToggleResponse
 } from '../../../gatewayTypes.js'
 import { formatVoiceRecordKey, parseVoiceRecordKey } from '../../../lib/platform.js'
+import { fmtK } from '../../../lib/text.js'
 import type { PanelSection } from '../../../types.js'
 import { applyConfiguredTuiTheme } from '../../createGatewayEventHandler.js'
 import { DEFAULT_INDICATOR_STYLE, INDICATOR_STYLES, type IndicatorStyle } from '../../interfaces.js'
@@ -79,12 +78,12 @@ const reasoningConfigPayload = (arg: string, sid: string) => {
 
 export const sessionCommands: SlashCommand[] = [
   {
-    aliases: ['background'],
+    aliases: ['bg', 'btw'],
     help: 'launch a background prompt',
-    name: 'bg',
+    name: 'background',
     run: (arg, ctx) => {
       if (!arg) {
-        return ctx.transcript.sys('/bg <prompt>')
+        return ctx.transcript.sys('/background <prompt>')
       }
 
       ctx.gateway.rpc<BackgroundStartResponse>('prompt.background', { session_id: ctx.sid, text: arg }).then(
@@ -95,26 +94,6 @@ export const sessionCommands: SlashCommand[] = [
 
           patchUiState(state => ({ ...state, bgTasks: new Set(state.bgTasks).add(r.task_id!) }))
           ctx.transcript.sys(`bg ${r.task_id} started`)
-        })
-      )
-    }
-  },
-
-  {
-    help: 'ask a side question about this conversation',
-    name: 'btw',
-    run: (arg, ctx) => {
-      if (!arg) {
-        return ctx.transcript.sys('/btw <question>')
-      }
-
-      ctx.gateway.rpc<BackgroundStartResponse>('prompt.btw', { session_id: ctx.sid, text: arg }).then(
-        ctx.guarded<BackgroundStartResponse>(r => {
-          if (!r.task_id) {
-            return
-          }
-
-          ctx.transcript.sys(`btw ${r.task_id} — answering from a conversation snapshot`)
         })
       )
     }
@@ -282,7 +261,7 @@ export const sessionCommands: SlashCommand[] = [
             }
 
             ctx.transcript.sys(
-              `compressed ${r.removed} messages${r.usage?.total ? ` · ${compactNumber(r.usage.total)} tok` : ''}`
+              `compressed ${r.removed} messages${r.usage?.total ? ` · ${fmtK(r.usage.total)} tok` : ''}`
             )
           })
         )
@@ -744,10 +723,7 @@ export const sessionCommands: SlashCommand[] = [
         const sections: PanelSection[] = [{ rows }]
 
         if (r.context_max) {
-          const mark = r.context_estimated ? '~' : ''
-          sections.push({
-            text: `Context: ${mark}${f(r.context_used)} / ${f(r.context_max)} (${mark}${r.context_percent}%)`
-          })
+          sections.push({ text: `Context: ${f(r.context_used)} / ${f(r.context_max)} (${r.context_percent}%)` })
         }
 
         if (r.compressions) {

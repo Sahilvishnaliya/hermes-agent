@@ -10,7 +10,7 @@ import { setHermesConfigCache, useHermesConfigRecord } from '../hooks/use-config
 
 import { ConfigField } from './config-field'
 import { SECTIONS } from './constants'
-import { diffConfig, enumOptionsFor, getNested, inferFieldSchema, setNested } from './helpers'
+import { enumOptionsFor, getNested, inferFieldSchema, setNested } from './helpers'
 
 // The curated voice keys (Settings → Voice) are the single source of which
 // per-provider fields exist; both the Voice settings page and the
@@ -45,18 +45,12 @@ export function VoiceProviderFields({ section, providerKey }: { section: 'tts' |
   // refetches must not clobber in-progress edits) — the same shape as
   // config-settings.tsx's autosave loop.
   const [config, setConfig] = useState<HermesConfigRecord | null>(null)
-  // Autosave sends only what changed against this baseline (config-settings.tsx
-  // pattern): the seeded record is a default-expanded snapshot, and echoing it
-  // whole would overwrite keys other surfaces changed since it loaded. The
-  // baseline advances to each successfully saved draft.
-  const [baseline, setBaseline] = useState<HermesConfigRecord | null>(null)
   const seeded = useRef(false)
 
   // eslint-disable-next-line no-restricted-syntax -- one-shot config seed flag, not an atom mirror
   useEffect(() => {
     if (loadedConfig && !seeded.current) {
       seeded.current = true
-      setBaseline(loadedConfig)
       setConfig(loadedConfig)
     }
   }, [loadedConfig])
@@ -70,11 +64,8 @@ export function VoiceProviderFields({ section, providerKey }: { section: 'tts' |
     }
 
     const timeout = window.setTimeout(() => {
-      void saveHermesConfig(diffConfig(baseline ?? {}, config))
-        .then(() => {
-          setBaseline(config)
-          setHermesConfigCache(config)
-        })
+      void saveHermesConfig(config)
+        .then(() => setHermesConfigCache(config))
         .catch(err => notifyError(err, t.settings.config.autosaveFailed))
     }, 550)
 

@@ -1,7 +1,6 @@
 import { atom } from 'nanostores'
 
 import { translateNow } from '@/i18n'
-import { isLocalBackendSlotWaitTimeout, requestPoolLimitsSettings } from '@/store/pool-limits'
 
 export type NotificationKind = 'error' | 'warning' | 'info' | 'success'
 
@@ -25,8 +24,6 @@ export interface AppNotification {
   message: string
   detail?: string
   action?: NotificationAction
-  /** Second, quieter button beside `action` (e.g. "Disable" next to "Sign in"). */
-  secondaryAction?: NotificationAction
   onDismiss?: () => void
   createdAt: number
   placement?: NotificationPlacement
@@ -42,7 +39,6 @@ export interface NotificationInput {
   message: string
   detail?: string
   action?: NotificationAction
-  secondaryAction?: NotificationAction
   onDismiss?: () => void
   durationMs?: number
   placement?: NotificationPlacement
@@ -133,10 +129,6 @@ const ERROR_SUMMARIES: { test: (msg: string) => boolean; summarize: (msg: string
   {
     test: msg => /microphone permission/i.test(msg),
     summarize: () => translateNow('notifications.errors.microphonePermission')
-  },
-  {
-    test: msg => /Restart required:/i.test(msg),
-    summarize: () => translateNow('notifications.errors.codeSkewRestartRequired')
   }
 ]
 
@@ -176,7 +168,6 @@ export function notify(input: NotificationInput): string {
     message: input.message,
     detail: input.detail,
     action: input.action,
-    secondaryAction: input.secondaryAction,
     onDismiss: input.onDismiss,
     createdAt: Date.now(),
     placement: input.placement ?? defaultPlacement(kind, input.action)
@@ -200,19 +191,12 @@ export function notify(input: NotificationInput): string {
 
 export function notifyError(error: unknown, fallback: string): string {
   const readable = readableError(error, fallback)
-  const poolSlotTimeout = isLocalBackendSlotWaitTimeout(error)
 
   return notify({
-    action: poolSlotTimeout
-      ? {
-          label: translateNow('desktop.poolSlotTimeoutOpenSettings'),
-          onClick: requestPoolLimitsSettings
-        }
-      : undefined,
     kind: 'error',
     title: fallback,
-    message: poolSlotTimeout ? translateNow('desktop.poolSlotTimeoutBody') : readable.message,
-    detail: poolSlotTimeout ? readable.message : readable.detail
+    message: readable.message,
+    detail: readable.detail
   })
 }
 

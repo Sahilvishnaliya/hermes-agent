@@ -5,11 +5,8 @@ import { persistString, storedString } from '@/lib/storage'
 
 import { $gateway } from './gateway'
 import { withinNativeNotifyBaseline } from './notify-baseline'
-import { $approvalRequests, answerApproval } from './prompts'
 import { clearApprovalRequest } from './prompts'
-import { isSessionGone, isSessionGoneForBackgroundPolling, markSessionGone } from './runtime-gone'
 import { $activeSessionId } from './session'
-import { storedSessionIdForRuntimeId } from './session-states'
 
 export type { HermesOpenTarget }
 
@@ -213,7 +210,6 @@ export function dispatchNativeNotification(input: NativeNotificationInput): bool
     actions: input.actions,
     activate: input.activate,
     body: input.body,
-    focusSessionId: input.sessionId ? (storedSessionIdForRuntimeId(input.sessionId) ?? undefined) : undefined,
     icon: input.icon,
     kind: input.kind,
     notifyId: input.notifyId,
@@ -356,10 +352,6 @@ export async function respondToApprovalAction(sessionId: null | string, actionId
     return
   }
 
-  if (sessionId && isSessionGone(sessionId)) {
-    return
-  }
-
   const gateway = $gateway.get()
 
   if (!gateway) {
@@ -367,17 +359,9 @@ export async function respondToApprovalAction(sessionId: null | string, actionId
   }
 
   try {
-    // The parked prompt knows how to answer itself: the live server request when
-    // still open, else the owner-routed queue-level RPC (#91684 client half).
-    const parked = $approvalRequests.get()[sessionId ?? '']
-
-    await answerApproval(gateway, parked ?? { sessionId: sessionId ?? null }, choice)
+    await gateway.request('approval.respond', { choice, session_id: sessionId ?? undefined })
     clearApprovalRequest(sessionId)
-  } catch (error) {
-    if (sessionId && isSessionGoneForBackgroundPolling(error)) {
-      markSessionGone(sessionId)
-    }
-
+  } catch {
     // Leave the prompt parked so the user can still resolve it in-app.
   }
 }

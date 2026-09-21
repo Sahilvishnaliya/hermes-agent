@@ -18,7 +18,6 @@ import {
   DropdownMenuTrigger,
   ErrorState,
   host,
-  isSubmitEnter,
   Loader,
   LogView,
   Textarea,
@@ -323,7 +322,7 @@ function CommentComposer({
           className={cn('field-sizing-content max-h-40 min-h-0 resize-none', running ? 'pr-[3.5rem]' : 'pr-[5rem]')}
           onChange={event => setBody(event.target.value)}
           onKeyDown={event => {
-            if (isSubmitEnter(event) && !event.shiftKey) {
+            if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault()
               submit()
             }
@@ -722,11 +721,11 @@ export function TaskDrawer({
                   <DropdownMenuSeparator />
                   <DropdownMenuItem onSelect={mutate(() => patchTask(task.id, { status: 'archived' }), onClose)}>
                     <Codicon name="archive" size="0.85rem" />
-                    {k.archive}
+                    {k.archiveTask}
                   </DropdownMenuItem>
                   <DropdownMenuItem className="text-destructive" onSelect={mutate(() => deleteTask(task.id), onClose)}>
                     <Codicon name="trash" size="0.85rem" />
-                    {k.delete}
+                    {k.deleteTask}
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -946,13 +945,11 @@ export function TaskDrawer({
               </Section>
             )}
 
-            {Array.isArray(detail.attachments) && (
-              <AttachmentsSection
-                attachments={detail.attachments}
-                onUpload={file => uploadMut.mutate(file)}
-                pending={uploadMut.isPending}
-              />
-            )}
+            <AttachmentsSection
+              attachments={detail.attachments}
+              onUpload={file => uploadMut.mutate(file)}
+              pending={uploadMut.isPending}
+            />
           </div>
         )}
       </div>

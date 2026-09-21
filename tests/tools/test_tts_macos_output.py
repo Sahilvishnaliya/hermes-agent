@@ -33,9 +33,9 @@ def _run_stream(monkeypatch):
     reproducing anything underneath it — on Darwin the branch exists because
     PortAudio init raises a TCC prompt, which no Linux runner can produce.
     """
-    from tools.tts_tool_speaker import stream_tts_to_speaker
+    import tools.tts_tool as tts
 
-    monkeypatch.setattr("hermes_cli.config.get_env_value",
+    monkeypatch.setattr("tools.tts_tool.get_env_value",
                         lambda name, default=None: "fake-key"
                         if name == "ELEVENLABS_API_KEY" else default)
     monkeypatch.setattr("tools.tts_tool._load_tts_config", lambda: {})
@@ -69,7 +69,7 @@ def _run_stream(monkeypatch):
     stop_event = threading.Event()
     done_event = threading.Event()
 
-    stream_tts_to_speaker(text_queue, stop_event, done_event)
+    tts.stream_tts_to_speaker(text_queue, stop_event, done_event)
     assert done_event.is_set()
     return sd_called["hit"]
 

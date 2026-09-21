@@ -16,12 +16,10 @@ import {
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
-import { AlertCircle, ChevronDown } from '@/lib/icons'
-import { isSubmitEnter } from '@/lib/ime'
+import { AlertCircle, ChevronDown, Loader2 } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { $gateway } from '@/store/gateway'
 import { notifyError } from '@/store/notifications'
-import { answerApproval } from '@/store/prompts'
 import {
   type ApprovalRequest,
   clearApprovalRequest,
@@ -41,12 +39,12 @@ import type { ToolPart } from './fallback-model'
 // Binding is POSITIONAL, not command-matched: the desktop `tool.start` payload
 // carries no structured args (only tool_id/name/context — see
 // tui_gateway/server.py::_on_tool_start), so we cannot join the approval to the
-// row by command string. `approval.request` can fire from the command guards
-// and protected-instruction file writes. The agent thread blocks on exactly one
+// row by command string. But `approval.request` only ever fires from the
+// `terminal` / `execute_code` guards and the agent thread blocks on exactly one
 // approval at a time, so the single pending row of those tools IS the row that
 // raised it. The command/description text comes from `$approvalRequest` (the
 // event payload), which is the only place that data reliably exists.
-export const APPROVAL_TOOLS = new Set(['terminal', 'execute_code', 'patch', 'write_file'])
+export const APPROVAL_TOOLS = new Set(['terminal', 'execute_code'])
 
 // Canonical gateway choices (ui-tui/src/components/prompts.tsx).
 type ApprovalChoice = 'once' | 'session' | 'always' | 'deny'
@@ -145,10 +143,11 @@ const ApprovalBar: FC<{ request: ApprovalRequest; surface: 'floating' | 'inline'
       setSubmitting(choice)
 
       try {
-        // Live prompt: the response frame rides the socket the request came on
-        // (the owner backend by construction). Restored prompt: queue-level
-        // `approval.respond`, owner-routed (#91684 client half).
-        await answerApproval(gateway, request, choice)
+        await gateway.request<{ resolved?: boolean }>('approval.respond', {
+          choice,
+          request_id: request.requestId,
+          session_id: request.sessionId ?? undefined
+        })
         triggerHaptic(choice === 'deny' ? 'cancel' : 'submit')
         clearApprovalRequest(request.sessionId, request.requestId)
         void replayPendingApproval(gateway, request.sessionId).catch(() => undefined)
@@ -157,7 +156,7 @@ const ApprovalBar: FC<{ request: ApprovalRequest; surface: 'floating' | 'inline'
         setSubmitting(null)
       }
     },
-    [busy, copy.gatewayDisconnected, copy.sendFailed, gateway, request]
+    [busy, copy.gatewayDisconnected, copy.sendFailed, gateway, request.requestId, request.sessionId]
   )
 
   // ⌘/Ctrl+Enter → Run, Esc → Reject.
@@ -169,7 +168,7 @@ const ApprovalBar: FC<{ request: ApprovalRequest; surface: 'floating' | 'inline'
     }
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (isSubmitEnter(event) && (event.metaKey || event.ctrlKey)) {
+      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
         event.preventDefault()
         void respond('once')
       } else if (event.key === 'Escape') {
@@ -193,13 +192,12 @@ const ApprovalBar: FC<{ request: ApprovalRequest; surface: 'floating' | 'inline'
           <Button
             className="h-full gap-1 rounded-none px-2 text-xs font-medium text-primary hover:bg-primary/15 hover:text-primary"
             disabled={busy}
-            loading={submitting === 'once'}
             onClick={() => void respond('once')}
             size="xs"
             variant="ghost"
           >
-            {copy.run}
-            <span className="text-[0.625rem] text-primary/60">{isMac ? '⌘⏎' : 'Ctrl⏎'}</span>
+            {submitting === 'once' ? <Loader2 className="size-3 animate-spin" /> : copy.run}
+            {submitting !== 'once' && <span className="text-[0.625rem] text-primary/60">{isMac ? '⌘⏎' : 'Ctrl⏎'}</span>}
           </Button>
           {hasMoreOptions && <span aria-hidden className="w-px self-stretch bg-primary/20" />}
           {hasMoreOptions && (
@@ -242,13 +240,12 @@ const ApprovalBar: FC<{ request: ApprovalRequest; surface: 'floating' | 'inline'
         <Button
           className="h-6 gap-1.5 rounded-md px-1.5 text-xs font-normal text-(--ui-text-tertiary) hover:text-foreground"
           disabled={busy}
-          loading={submitting === 'deny'}
           onClick={() => void respond('deny')}
           size="xs"
           variant="ghost"
         >
-          {copy.reject}
-          <span className="text-[0.625rem] opacity-55">Esc</span>
+          {submitting === 'deny' ? <Loader2 className="size-3 animate-spin" /> : copy.reject}
+          {submitting !== 'deny' && <span className="text-[0.625rem] opacity-55">Esc</span>}
         </Button>
 
         {hasCommand && (

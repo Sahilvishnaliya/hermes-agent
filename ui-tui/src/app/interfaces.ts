@@ -1,5 +1,4 @@
 import type { MouseTrackingMode, ScrollBoxHandle } from '@hermes/ink'
-import type { Usage } from '@hermes/shared/gateway-events'
 import type { MutableRefObject, ReactNode, RefObject, SetStateAction } from 'react'
 
 import type { PasteEvent } from '../components/textInput.js'
@@ -30,7 +29,7 @@ import type {
   SessionInfo,
   SlashCatalog,
   SudoReq,
-  VaultUnlockReq
+  Usage
 } from '../types.js'
 
 export interface StateSetter<T> {
@@ -298,7 +297,6 @@ export interface OverlayState {
   petPicker: boolean
   pluginsHub: boolean
   secret: null | SecretReq
-  vaultUnlock: null | VaultUnlockReq
   sessions: boolean
   skillsHub: boolean
   subscription: SubscriptionOverlayState | null
@@ -324,9 +322,6 @@ export interface UiState {
   busy: boolean
   busyInputMode: BusyInputMode
   compact: boolean
-  // Context compaction in progress (idle/preflight/auto). Distinct from
-  // `compact`, which is the /compact layout-density flag.
-  compacting: boolean
   destructiveSlashConfirm: boolean
   detailsMode: DetailsMode
   detailsModeCommandOverride: boolean
@@ -348,10 +343,6 @@ export interface UiState {
   sid: null | string
   status: string
   statusBar: StatusBarMode
-  // display.status_bar.fields — visibility filter for status-rule segments,
-  // shared with the classic CLI bar. null = user has not customized (show
-  // the default set).
-  statusBarFields: null | ReadonlySet<string>
   streaming: boolean
   theme: Theme
   // `display.timestamps` — dim [HH:MM] labels on user/assistant transcript
@@ -492,15 +483,10 @@ export interface GatewayEventHandlerContext {
     setCatalog: StateSetter<null | SlashCatalog>
   }
   submission: {
-    /** Submit text literally as a prompt — no slash/!/interpolation dispatch.
-     *  Used for `-q` startup queries, which are arbitrary launcher-provided
-     *  text (parity with one-shot's literal prompt handling). */
-    submitLiteralRef: MutableRefObject<(value: string) => void>
     submitRef: MutableRefObject<(value: string) => void>
   }
   system: {
     bellOnComplete: boolean
-    bellOnPrompt?: boolean
     stdout?: NodeJS.WriteStream
     sys: (text: string) => void
   }
@@ -569,7 +555,6 @@ export interface AppLayoutActions {
   answerClarifyQuestion: (qid: string, answer: string) => void
   answerSecret: (value: string) => void
   answerSudo: (pw: string) => void
-  answerVaultUnlock: (password: string) => void
   clearSelection: () => void
   activateLiveSession: (id: string) => void
   closeLiveSession: (id: string) => Promise<null | SessionCloseResponse>
@@ -644,7 +629,6 @@ export interface AppOverlaysProps {
   onResumeSelect: (sessionId: string) => void
   onSecretSubmit: (value: string) => void
   onSudoSubmit: (pw: string) => void
-  onVaultUnlockSubmit: (password: string) => void
   pagerPageSize: number
 }
 

@@ -13,7 +13,7 @@ import {
   setSelectedStoredSessionId,
   workspaceCwdBelongsToSelectedSession
 } from '@/store/session'
-import type { SessionInfo, SessionResumeResult } from '@/types/hermes'
+import type { SessionInfo, SessionResumeResponse } from '@/types/hermes'
 
 import {
   appendLiveSessionProjection,
@@ -26,7 +26,6 @@ import {
   goneSessionVerdict,
   isSessionGoneError,
   overlayConcurrentMessageChanges,
-  preserveEquivalentTranscript,
   preserveLocalPendingTurnMessages,
   reconcileResumeMessages,
   removeRepresentedLocalLiveProjection,
@@ -1545,7 +1544,7 @@ describe('resolveResumedBusy', () => {
   })
 })
 
-const runningProjection = (user: string): SessionResumeResult =>
+const runningProjection = (user: string): SessionResumeResponse =>
   ({
     session_id: 'runtime-1',
     session_key: 'stored-1',
@@ -1554,7 +1553,7 @@ const runningProjection = (user: string): SessionResumeResult =>
     messages: [],
     running: true,
     inflight: { user, assistant: 'partial answer', streaming: true }
-  }) as SessionResumeResult
+  }) as SessionResumeResponse
 
 describe('dedupeInflightUserAgainstTranscript', () => {
   it('retains the in-flight user source only when it already exists after the runtime anchor', () => {
@@ -1716,45 +1715,5 @@ describe('overlayConcurrentMessageChanges', () => {
       { type: 'text', text: 'partial A' },
       { type: 'text', text: ' + delta B' }
     ])
-  })
-})
-
-describe('preserveEquivalentTranscript', () => {
-  it('keeps the current array BY REFERENCE when the replacement is content-equivalent', () => {
-    // The exact warm-resume shape of #95595: fresh objects, identical content.
-    const current = [msg('u-1', 'user', 'hello'), msg('a-1', 'assistant', 'const x = 1')]
-    const freshObjects = current.map(message => ({ ...message, parts: [...message.parts] }))
-
-    const preserved = preserveEquivalentTranscript(current, freshObjects)
-
-    expect(preserved).toBe(current)
-    expect(preserved[0]).toBe(current[0])
-  })
-
-  it('keeps the current array when the arrays are the same reference', () => {
-    const current = [msg('u-1', 'user', 'hello')]
-
-    expect(preserveEquivalentTranscript(current, current)).toBe(current)
-  })
-
-  it('accepts the replacement when anything changed', () => {
-    const current = [msg('u-1', 'user', 'hello')]
-    const next = [msg('u-1', 'user', 'hello'), msg('a-1', 'assistant', 'new turn')]
-
-    expect(preserveEquivalentTranscript(current, next)).toBe(next)
-  })
-
-  it('rejects the replacement when a message diverges in content', () => {
-    const current = [msg('u-1', 'user', 'hello')]
-    const next = [msg('u-1', 'user', 'hello world')]
-
-    expect(preserveEquivalentTranscript(current, next)).toBe(next)
-  })
-
-  it('rejects the replacement when metadata a row renders diverges', () => {
-    const current = [msg('u-1', 'user', 'hello')]
-    const next = [msg('u-1', 'user', 'hello', { pending: true })]
-
-    expect(preserveEquivalentTranscript(current, next)).toBe(next)
   })
 })
