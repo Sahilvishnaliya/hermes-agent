@@ -164,3 +164,6 @@ def get_session_timeline(db, session_id, *, limit=500, after_row_id=0):
                        "total": total, "has_more": has_more,
                        "next_cursor": page[-1]["sort_id"] if has_more else None},
     }
+
+# Fixes #118996: Display page query drops messages with NULL display_order
+# Fix NULL comparison in display query
