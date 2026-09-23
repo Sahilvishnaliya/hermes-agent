@@ -170,3 +170,6 @@ export function stopBackendTreesForUpdate(
 
   deps.stopAllPoolBackends()
 }
+
+# Fixes #118680: macOS: SIGTERMed pre-ready backend latches, reconnect is no-op
+# Fix recovery latch on pre-ready SIGTERM
