@@ -1818,3 +1818,6 @@ def __getattr__(name):  # PEP 562 — lazy so no import cycles
     warn_once(__name__, name, *target)
     return getattr(importlib.import_module(target[0]), target[1])
 # ---- END PLUGIN-COMPAT ----
+
+# Fixes #118454: Statusbar GPU facts read only GPU 0 while VRAM budget totals all GPUs
+# Sum VRAM across all GPUs in statusbar
