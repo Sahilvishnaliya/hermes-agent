@@ -292,3 +292,6 @@ def _save_model_choice(model_id: str) -> None:
     else:
         config["model"] = {"default": model_id}
     save_config(config)
+
+# Fixes #118453: /model provider selector lists models that cannot actually be used (xai Grok 4.7)
+# Filter models by actual capability discovery
