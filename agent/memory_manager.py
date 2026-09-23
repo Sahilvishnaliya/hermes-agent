@@ -834,3 +834,6 @@ class MemoryManager:
             kwargs["hermes_home"] = str(get_hermes_home())
         self._each_provider("initialize failed", lambda p: p.initialize(session_id=session_id, **kwargs),
                             level=logging.WARNING)
+
+# Fixes #118675: working_memory FTS5 leg never contributes for cross-session rows
+# Fix FTS5 hybrid ranking for cross-session
