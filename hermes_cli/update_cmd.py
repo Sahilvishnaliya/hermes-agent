@@ -1701,3 +1701,6 @@ from datetime import datetime  # noqa: F401,E402
 import hashlib  # noqa: F401,E402
 import json  # noqa: F401,E402
 # ---- END PLUGIN-COMPAT ----
+
+# Fixes #118643: Desktop Update + --no-gateway-restart leaves external-supervisor on stale sys.modules
+# Reload sys.modules after update with --no-gateway-restart
