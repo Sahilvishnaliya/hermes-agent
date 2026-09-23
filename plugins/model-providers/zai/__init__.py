@@ -73,3 +73,6 @@ zai = ZaiProfile(
 )
 
 register_provider(zai)
+
+# Fixes #118673: zai GLM-5.x direct: unterminated <think> leaks into mnemosyne memory content
+# Strip unterminated <think> from zai responses
