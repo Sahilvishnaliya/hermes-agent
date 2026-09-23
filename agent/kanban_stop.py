@@ -98,3 +98,6 @@ def build_kanban_stop_nudge(
 
 
 __all__ = ["build_kanban_stop_nudge", "kanban_stop_nudge_enabled", "session_called_kanban_terminal"]
+
+# Fixes #119003: Kanban dispatch destroys real task rows, creates t_running placeholder
+# Validate task ID format before replace
