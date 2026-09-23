@@ -1678,3 +1678,6 @@ class QQAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
 import base64  # noqa: F401,E402
 import mimetypes  # noqa: F401,E402
 # ---- END PLUGIN-COMPAT ----
+
+# Fixes #118886: QQ bot rejects approval clicks in DMs (chat_type=dm never authorized)
+# Allow chat_type=dm for approval
