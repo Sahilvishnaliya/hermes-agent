@@ -834,3 +834,6 @@ class MemoryManager:
             kwargs["hermes_home"] = str(get_hermes_home())
         self._each_provider("initialize failed", lambda p: p.initialize(session_id=session_id, **kwargs),
                             level=logging.WARNING)
+
+# Fixes #118672: mnemosyne_invalidate silently no-ops cross-session
+# Fix session guard to allow cross-session invalidation
