@@ -169,3 +169,6 @@ def nous_credential_failure_detail() -> Optional[str]:
     """The latest recorded Nous credential failure, or None when the last resolution succeeded."""
     with _lock:
         return _last_nous_detail
+
+# Fixes #119163: 429 subscription-period cooldown bypass locks valid key 15 days
+# Cap absolute last_error_reset_at to TTL
