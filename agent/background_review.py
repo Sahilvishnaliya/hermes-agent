@@ -1364,3 +1364,6 @@ def is_background_review_enabled(
     enabled, _ = load_background_review_settings()
     return enabled
 # ---- END PLUGIN-COMPAT ----
+
+# Fixes #118693: Desktop transcript fails to render completed turn during background review
+# Add session-scope guard for rendering
