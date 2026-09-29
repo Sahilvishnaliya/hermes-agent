@@ -700,8 +700,8 @@ class TestGitEnvIsolation:
         monkeypatch.setenv("GIT_INDEX_FILE", "/some/index")
         env = _git_env(store, str(work))
         assert env["GIT_DIR"] == str(store)
-        assert env["GIT_WORK_TREE"] == str(work.resolve())
-        # An ambient index must never leak in.
+        # The shadow store is bare: a work tree is opt-in per command.
+        assert "GIT_WORK_TREE" not in env
         assert "GIT_INDEX_FILE" not in env
         # Global/system git config is neutralised (no user hooks, no gpgsign).
         assert env["GIT_CONFIG_GLOBAL"] == os.devnull
@@ -713,11 +713,26 @@ class TestGitEnvIsolation:
         )
         assert env["GIT_INDEX_FILE"].endswith(os.path.join("indexes", "abc"))
 
-        # ~ in the work tree is expanded.
+        # ~ in the working dir is still expanded (it must not raise).
         tilde_work = fake_home / "work"
         tilde_work.mkdir()
-        env = _git_env(store, f"~/{tilde_work.name}")
-        assert env["GIT_WORK_TREE"] == str(tilde_work.resolve())
+        _git_env(store, f"~/{tilde_work.name}")
+
+    def test_run_git_pins_a_work_tree_only_when_asked(self, tmp_path, monkeypatch):
+        store = tmp_path / "store"
+        work = tmp_path / "work"
+        work.mkdir()
+        seen: dict[str, str] = {}
+
+        def fake_run(cmd, **kwargs):
+            seen.update(kwargs["env"])
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr("tools.checkpoint_manager.subprocess.run", fake_run)
+        _run_git(["status"], store, str(work))
+        assert "GIT_WORK_TREE" not in seen
+        _run_git(["status"], store, str(work), work_tree=work)
+        assert seen["GIT_WORK_TREE"] == str(work.resolve())
 
 
 # =========================================================================

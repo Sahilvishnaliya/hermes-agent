@@ -334,14 +334,24 @@ def _git_env(
     ``index_file``, if given, forces git to use a per-project index under
     ``store/indexes/<hash>`` so projects don't race on a shared index.
     """
-    normalized_working_dir = _normalize_path(working_dir)
-    # git child with hand-isolated config env; exact preservation — a HOME
+
+    # git child with hand-isolated config env; exact preservation - a HOME
     # rewrite would change which ~/.gitconfig the isolation vars are hiding.
     from tools.environments.local import build_subprocess_env
 
     env = selected_git_env(build_subprocess_env(scrub_secrets=False, inherit_profile_home=False))
     env["GIT_DIR"] = str(store)
-    env["GIT_WORK_TREE"] = str(normalized_working_dir)
+    # Do NOT set GIT_WORK_TREE here.  The shadow store is bare and most
+    # store_calls (init, ls-files, rev-parse, write-tree, commit-tree,
+    # config, cat-file) operate on the store alone.  Writing GIT_WORK_TREE
+    # = the user's project dir lets `git init --bare` (and any checkout /
+    # add -A walk) reach into a nested clone inside the project and
+    # reinitialize its inner .git — which git 2.x destroys as a mode-160000
+    # gitlink (reproducible: #127073, /rollback inside a project with a
+    # nested submodule/outer repo).  Callers that genuinely need the working
+    # tree (_take's `git add -A`, _restore's `checkout -- <path>`) pass it
+    # explicitly via the work_tree kwarg on _run_git.
+    env.pop("GIT_WORK_TREE", None)
     env.pop("GIT_NAMESPACE", None)
     env.pop("GIT_ALTERNATE_OBJECT_DIRECTORIES", None)
     if index_file is not None:
@@ -362,6 +372,7 @@ def _run_git(
     allowed_returncodes: Optional[set[int]] = None,
     index_file: Optional[Path] = None,
     extra_env: Optional[dict[str, str]] = None,
+    work_tree: Optional[Path] = None,
 ) -> tuple[bool, str, str]:
     """Run a git command against the shared store.  Returns (ok, stdout, stderr).
 
@@ -380,6 +391,8 @@ def _run_git(
         return False, "", msg
 
     env = _git_env(store, str(normalized_working_dir), index_file=index_file)
+    if work_tree:
+        env["GIT_WORK_TREE"] = str(work_tree)
     if extra_env:
         env.update(extra_env)
     git = shutil.which("git", path=env.get("PATH", ""))
@@ -875,7 +888,8 @@ class CheckpointManager:
 
         # Stage the current tree so the name-only diff sees new files too.
         _run_git(["add", "-A"], store, abs_dir,
-                 timeout=_GIT_TIMEOUT * 2, index_file=index_file)
+                 timeout=_GIT_TIMEOUT * 2, index_file=index_file,
+                 work_tree=abs_dir)
         ok, names_out, err = _run_git(
             ["diff", "--name-only", "-z", commit_hash, "--cached"],
             store, abs_dir, index_file=index_file,
@@ -1056,7 +1070,8 @@ class CheckpointManager:
 
         # Stage current state into the per-project index to compare.
         _run_git(["add", "-A"], store, abs_dir,
-                 timeout=_GIT_TIMEOUT * 2, index_file=index_file)
+                 timeout=_GIT_TIMEOUT * 2, index_file=index_file,
+                 work_tree=abs_dir)
 
         ok_stat, stat_out, _ = _run_git(
             ["diff", "--stat", commit_hash, "--cached"],
@@ -1214,7 +1229,7 @@ class CheckpointManager:
                         if ok:
                             ok, selected, err = _run_git(
                                 ["ls-files", "--stage", "--error-unmatch", "-z", "--", file_path],
-                                store, abs_dir, index_file=inspect_index,
+                                store, abs_dir, index_file=inspect_index, work_tree=abs_dir,
                             )
                         if not ok:
                             return {"success": False, "error": f"Could not inspect restore selection: {err}"}
@@ -1320,7 +1335,7 @@ class CheckpointManager:
                 ok, _stdout, err = _run_git(
                     ["checkout", commit_hash, "--", *checkout_targets],
                     store, abs_dir, timeout=_GIT_TIMEOUT * 2,
-                    index_file=index_file,
+                    index_file=index_file, work_tree=abs_dir,
                 )
         elif selected_paths is not None:
             # Check out exactly the entries inspected above. Re-evaluating
@@ -1335,14 +1350,14 @@ class CheckpointManager:
                     ["checkout", commit_hash, f"--pathspec-from-file={spec_file}",
                      "--pathspec-file-nul"],
                     store, abs_dir, timeout=_GIT_TIMEOUT * 2,
-                    index_file=index_file,
+                    index_file=index_file, work_tree=abs_dir,
                     extra_env={"GIT_LITERAL_PATHSPECS": "1"},
                 )
         else:
             ok, _stdout, err = _run_git(
                 ["checkout", commit_hash, "--", file_path if file_path else "."],
                 store, abs_dir, timeout=_GIT_TIMEOUT * 2,
-                index_file=index_file,
+                index_file=index_file, work_tree=abs_dir,
             )
 
         if not ok:
@@ -1468,6 +1483,7 @@ class CheckpointManager:
         ok, _, err = _run_git(
             ["add", "-A"], store, working_dir,
             timeout=_GIT_TIMEOUT * 2, index_file=index_file,
+            work_tree=working_dir,
         )
         if not ok:
             logger.debug("Checkpoint git-add failed: %s", err)
