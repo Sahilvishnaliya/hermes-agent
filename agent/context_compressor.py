@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from agent.image_eviction_policy import outbound_image_retire_count
+from agent.image_eviction_policy import images_all_within_many_image_limit, outbound_image_retire_count
 from agent.compression_marker import (
     ELISION_MARKER_MAX_LEN,
     _elision_marker,
@@ -1511,17 +1511,20 @@ def _retire_stale_tool_result_images(
     return pruned
 
 
-def _image_payload(msg: Dict[str, Any]) -> Tuple[int, int]:
-    """``(blocks, bytes)`` of image payload in a message.
+def _image_payload(msg: Dict[str, Any]) -> Tuple[int, int, List[str]]:
+    """``(blocks, bytes, sources)`` of image payload in a message.
 
     The provider counts BLOCKS: one ``tool_result`` carrying three screenshots is three against
     the per-request limit. Bytes are the data-URL / base64 length — the payload is ASCII and the
     JSON framing around it is noise against a 24 MB budget, so no per-request re-serialization.
+    ``sources`` holds each image's data URL/base64 string so the caller can read dimensions from
+    headers only, without a second walk or a full decode.
     """
     parts = _tool_result_parts(msg.get("content"))
     if not isinstance(parts, list):
-        return 0, 0
+        return 0, 0, []
     blocks = payload = 0
+    sources: List[str] = []
     for p in parts:
         if not _is_image_part(p):
             continue
@@ -1531,10 +1534,13 @@ def _image_payload(msg: Dict[str, Any]) -> Tuple[int, int]:
         data = (
             (image_url.get("url") if isinstance(image_url, dict) else image_url)
             or (source.get("data") if isinstance(source, dict) else None)
-            or ""
         )
-        payload += len(data) if isinstance(data, str) else 0
-    return blocks, payload
+        if isinstance(data, str):
+            payload += len(data)
+            sources.append(data)
+        else:
+            sources.append("")
+    return blocks, payload, sources
 
 
 def evict_stale_outbound_tool_images(api_messages: List[Dict[str, Any]]) -> int:
@@ -1548,30 +1554,39 @@ def evict_stale_outbound_tool_images(api_messages: List[Dict[str, Any]]) -> int:
 
     Eviction is driven by the provider limit, counted in image BLOCKS, with user uploads
     reserved against the ceiling but never rewritten — policy and rationale in
-    :mod:`agent.image_eviction_policy`. Returns the number of messages rewritten.
+    :mod:`agent.image_eviction_policy`. The block ceiling is conditional on the request's actual
+    image dimensions: the strict 20 only when some image exceeds the many-image per-side cap, the
+    hard count otherwise, so an image-heavy run of pre-shrunk screenshots no longer pays a prefix
+    rewrite per batch. Returns the number of messages rewritten.
     """
-    carriers: List[Tuple[int, Tuple[int, int]]] = []
+    carriers: List[Tuple[int, int, int, List[str]]] = []  # (index, blocks, bytes, sources)
     reserved_blocks = reserved_bytes = 0
+    reserved_sources: List[str] = []
     for i in range(len(api_messages) - 1, -1, -1):
         msg = api_messages[i]
         if not isinstance(msg, dict):
             continue
-        blocks, size = _image_payload(msg)
+        blocks, size, sources = _image_payload(msg)
         if not blocks:
             continue
         if msg.get("role") == "tool":
-            carriers.append((i, (blocks, size)))
+            carriers.append((i, blocks, size, sources))
         else:
             reserved_blocks += blocks
             reserved_bytes += size
+            reserved_sources.extend(sources)
+    many_image_safe = images_all_within_many_image_limit(
+        [*reserved_sources, *(source for _, _, _, sources in carriers for source in sources)]
+    )
     retire = outbound_image_retire_count(
-        [blocks for _, (blocks, _) in carriers],
+        [blocks for _, blocks, _, _ in carriers],
         reserved_blocks,
-        carrier_bytes_newest_first=[size for _, (_, size) in carriers],
+        carrier_bytes_newest_first=[size for _, _, size, _ in carriers],
         reserved_bytes=reserved_bytes,
+        many_image_safe=many_image_safe,
     )
     pruned = 0
-    for i, _ in carriers[len(carriers) - retire:]:
+    for i, _, _, _ in carriers[len(carriers) - retire:]:
         new_msg = _strip_images_from_tool_msg(api_messages[i])
         if new_msg is not None:
             api_messages[i] = new_msg
