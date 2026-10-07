@@ -17,6 +17,7 @@ from agent.anthropic_message_convert import _evict_old_screenshots
 from agent.context_compressor import evict_stale_outbound_tool_images
 from agent.image_eviction_policy import (
     IMAGE_EVICTION_BATCH,
+    OUTBOUND_IMAGE_BUDGET_BYTES,
     OUTBOUND_IMAGE_FLOOR,
     OUTBOUND_IMAGE_LIMIT,
     outbound_image_retire_count,
@@ -176,6 +177,44 @@ def test_one_oversized_image_keeps_the_strict_trigger():
     )
     _evict_old_screenshots(wire)
     assert _wire_image_blocks(wire) == OUTBOUND_IMAGE_LIMIT - IMAGE_EVICTION_BATCH + 1
+
+
+def test_wire_pass_enforces_the_byte_budget_below_the_block_ceiling():
+    """The aux/MoA Anthropic path reaches the wire pass alone, and that pass used to have no
+    request-size guard: 10 image blocks is half the block ceiling, but 30 MB of base64 is over
+    Anthropic's 32 MB Messages limit once text and JSON framing are added. Byte pressure must
+    retire carriers even while the block count is comfortably fine."""
+    big = "Q" * (3 * MB)  # ~2.2 MB decoded per image, unreadable header -> strict trigger
+    result: list[dict] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": big}}
+            ],
+        }
+    ]
+    for i in range(9):
+        result.append({"role": "assistant", "content": [{"type": "text", "text": "s"}]})
+        result.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": f"t{i}",
+                        "content": [
+                            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": big}}
+                        ],
+                    }
+                ],
+            }
+        )
+    blocks_before = _wire_image_blocks(result)
+    assert 10 * len(big) > OUTBOUND_IMAGE_BUDGET_BYTES and blocks_before < OUTBOUND_IMAGE_LIMIT
+    _evict_old_screenshots(result)
+    assert _wire_image_blocks(result) < blocks_before, (
+        "the wire pass ignored byte pressure while under the block ceiling"
+    )
 
 
 def test_dimension_classification_reads_headers_and_fails_closed():

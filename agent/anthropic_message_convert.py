@@ -618,10 +618,12 @@ def _evict_old_screenshots(result: List[Dict[str, Any]]) -> None:
 
     Mutates ``result`` in place. The block ceiling is conditional on the request's actual image
     dimensions (the strict 20 only when some image exceeds the many-image per-side cap), so this
-    pass reads the headers of the ``source.data`` payloads it already holds. The auxiliary Anthropic
-    client (``agent.auxiliary_client`` via ``anthropic_adapter.build_anthropic_kwargs``) reaches
-    this pass without the compressor's send-path pass, so it must hold the invariant alone. Policy
-    and rationale: :mod:`agent.image_eviction_policy`.
+    pass reads the headers of the ``source.data`` payloads it already holds. It sizes the block
+    budget AND the byte budget, the latter because the auxiliary Anthropic client
+    (``agent.auxiliary_client`` via ``anthropic_adapter.build_anthropic_kwargs``) reaches this pass
+    without the compressor's send-path pass, so it must hold the invariant alone -- previously with
+    no request-size guard at all (post-#113953 review). Policy and rationale:
+    :mod:`agent.image_eviction_policy`.
     """
     reserved = [
         (block, _image_source_data(block))
@@ -647,7 +649,13 @@ def _evict_old_screenshots(result: List[Dict[str, Any]]) -> None:
         ]
     )
     retire = outbound_image_retire_count(
-        [len(images) for _, images in carriers], len(reserved), many_image_safe=many_image_safe
+        [len(images) for _, images in carriers],
+        len(reserved),
+        carrier_bytes_newest_first=[
+            sum(len(data) for _, data in images if data) for _, images in carriers
+        ],
+        reserved_bytes=sum(len(data) for _, data in reserved if data),
+        many_image_safe=many_image_safe,
     )
     for block, _ in carriers[len(carriers) - retire:]:
         placeholder = _text_block("[screenshot removed to save context]")
