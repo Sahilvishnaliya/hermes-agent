@@ -9,16 +9,89 @@ covers the numbers once.
 
 from __future__ import annotations
 
+import base64
+
 import pytest
 
+from agent.anthropic_message_convert import _evict_old_screenshots
+from agent.context_compressor import evict_stale_outbound_tool_images
 from agent.image_eviction_policy import (
     IMAGE_EVICTION_BATCH,
+    OUTBOUND_IMAGE_BUDGET_BYTES,
     OUTBOUND_IMAGE_FLOOR,
     OUTBOUND_IMAGE_LIMIT,
     outbound_image_retire_count,
 )
 
 MB = 1_000_000
+
+# Anthropic's >20-images stricter per-side cap in px. Kept as a literal, not an import, so the
+# two invariants below still run (and fail) against the pre-change policy module.
+MANY_IMAGE_CAP_PX = 2000
+
+
+def _png_data_url(width: int, height: int) -> str:
+    """A data URL whose PNG IHDR declares ``width`` x ``height``.
+
+    Only the 24 bytes a header-only reader inspects are needed, which is exactly the contract
+    the policy relies on: classifying a request must not decode whole payloads.
+    """
+    ihdr = "IHDR".encode("ascii") + width.to_bytes(4, "big") + height.to_bytes(4, "big") + b"\x08\x06\x00\x00\x00"
+    raw = b"\x89PNG\r\n\x1a\n" + len(ihdr).to_bytes(4, "big") + ihdr
+    return "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+
+
+def _screenshot_tool_messages(n: int, url: str) -> list[dict]:
+    """``n`` OpenAI-shaped tool results, one image block each."""
+    messages: list[dict] = []
+    for i in range(n):
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": f"call_{i}",
+                "content": [
+                    {"type": "text", "text": f"shot {i}"},
+                    {"type": "image_url", "image_url": {"url": url}},
+                ],
+            }
+        )
+    return messages
+
+
+def _wire_tool_results(n: int, url: str) -> list[dict]:
+    """``n`` Anthropic wire user-turns, each carrying one image ``tool_result``."""
+    data = url.split(",", 1)[1]
+    result: list[dict] = [{"role": "user", "content": [{"type": "text", "text": "start"}]}]
+    for i in range(n):
+        result.append({"role": "assistant", "content": [{"type": "text", "text": f"shot {i}"}]})
+        result.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": f"t{i}",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": "image/png", "data": data},
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    return result
+
+
+def _wire_image_blocks(result: list[dict]) -> int:
+    return sum(
+        1
+        for msg in result
+        for block in (msg.get("content") if isinstance(msg.get("content"), list) else [])
+        for inner in (block.get("content") if block.get("type") == "tool_result" else [block])
+        if isinstance(inner, dict) and inner.get("type") == "image"
+    )
 
 
 @pytest.mark.parametrize(
@@ -55,6 +128,118 @@ def test_retire_count(blocks, reserved, sizes, reserved_bytes, expected):
         )
         == expected
     )
+
+
+@pytest.mark.parametrize("n", [OUTBOUND_IMAGE_LIMIT + 1, 30])
+def test_pre_shrunk_screenshots_do_not_trip_the_many_image_trigger(n):
+    """Invariant 1 (#133999): a request whose images are all within the many-image per-side cap
+    crosses no Anthropic constraint at image #21, so no prefix may be rewritten.
+
+    Hermes embeds its own tool images at 1568 px (vision_analyze / browser) and 1456 px
+    (computer_use), i.e. comfortably under the 2000 px cap the >20 rule would tighten. Retiring a
+    batch here buys nothing and costs a full prompt-cache rewrite per batch -- plus the cache
+    invalidation of every later thinking block on the preserved-thinking models. Red on base:
+    8 rewrites at n=21, 16 at n=30.
+    """
+    shrunk = _png_data_url(1568, 882)
+    assert evict_stale_outbound_tool_images(_screenshot_tool_messages(n, shrunk)) == 0
+
+    # The wire pass reaches aux/MoA requests without the compressor's pass, so it must hold
+    # the same invariant alone.
+    wire = _wire_tool_results(n, shrunk)
+    _evict_old_screenshots(wire)
+    assert _wire_image_blocks(wire) == n
+
+
+def test_one_oversized_image_keeps_the_strict_trigger():
+    """Invariant 2 (#133999): the stricter cap is per request, so a single image over the cap --
+    here a native-size user upload -- must keep the strict 20-block trigger for the whole request,
+    byte-identical to the pre-#133999 behaviour."""
+    shrunk = _png_data_url(1568, 882)
+    oversized = _png_data_url(MANY_IMAGE_CAP_PX + 1, 8)
+
+    upload = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "look at this"},
+            {"type": "image_url", "image_url": {"url": oversized}},
+        ],
+    }
+    outbound = [upload, *_screenshot_tool_messages(OUTBOUND_IMAGE_LIMIT, shrunk)]
+    assert evict_stale_outbound_tool_images(outbound) == IMAGE_EVICTION_BATCH
+    # The upload itself is reserved and never rewritten.
+    assert upload["content"][1]["image_url"]["url"] == oversized
+
+    # Same request on the wire shape: 20 pre-shrunk carriers plus the oversized reserved upload.
+    wire = _wire_tool_results(OUTBOUND_IMAGE_LIMIT, shrunk)
+    wire[0]["content"].append(
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": oversized.split(",", 1)[1]}}
+    )
+    _evict_old_screenshots(wire)
+    assert _wire_image_blocks(wire) == OUTBOUND_IMAGE_LIMIT - IMAGE_EVICTION_BATCH + 1
+
+
+def test_wire_pass_enforces_the_byte_budget_below_the_block_ceiling():
+    """The aux/MoA Anthropic path reaches the wire pass alone, and that pass used to have no
+    request-size guard: 10 image blocks is half the block ceiling, but 30 MB of base64 is over
+    Anthropic's 32 MB Messages limit once text and JSON framing are added. Byte pressure must
+    retire carriers even while the block count is comfortably fine."""
+    big = "Q" * (3 * MB)  # ~2.2 MB decoded per image, unreadable header -> strict trigger
+    result: list[dict] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": big}}
+            ],
+        }
+    ]
+    for i in range(9):
+        result.append({"role": "assistant", "content": [{"type": "text", "text": "s"}]})
+        result.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": f"t{i}",
+                        "content": [
+                            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": big}}
+                        ],
+                    }
+                ],
+            }
+        )
+    blocks_before = _wire_image_blocks(result)
+    assert 10 * len(big) > OUTBOUND_IMAGE_BUDGET_BYTES and blocks_before < OUTBOUND_IMAGE_LIMIT
+    _evict_old_screenshots(result)
+    assert _wire_image_blocks(result) < blocks_before, (
+        "the wire pass ignored byte pressure while under the block ceiling"
+    )
+
+
+def test_dimension_classification_reads_headers_and_fails_closed():
+    """The ceiling may only relax on dimensions this module can actually read.
+
+    Imported inside the test so the two invariants above still exercise the pre-change module.
+    """
+    from agent.image_eviction_policy import (
+        MANY_IMAGE_DIMENSION_LIMIT,
+        image_max_side_from_data,
+        image_within_many_image_limit,
+        images_all_within_many_image_limit,
+    )
+
+    shrunk = _png_data_url(1568, 882)
+    assert MANY_IMAGE_DIMENSION_LIMIT == MANY_IMAGE_CAP_PX
+    assert image_max_side_from_data(shrunk) == 1568
+    assert image_within_many_image_limit(_png_data_url(MANY_IMAGE_CAP_PX, 1)) is True
+    assert image_within_many_image_limit(_png_data_url(MANY_IMAGE_CAP_PX + 1, 1)) is False
+    # Unreadable, absent, or non-image sources must keep the strict trigger.
+    assert image_within_many_image_limit(None) is False
+    assert image_within_many_image_limit("data:image/png;base64,not-a-png") is False
+    assert image_within_many_image_limit("https://example.com/shot.png") is False
+    assert images_all_within_many_image_limit([shrunk, shrunk]) is True
+    assert images_all_within_many_image_limit([shrunk, "https://example.com/shot.png"]) is False
 
 
 def test_quantum_shrinks_to_the_fit_window_for_heavy_carriers():
