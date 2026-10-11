@@ -121,3 +121,108 @@ def test_start_decisions_do_not_turn_uncertainty_into_another_owner():
         assert next_start_action(observation) == expected
     with pytest.raises(ValueError, match="unknown runtime state"):
         next_start_action(RuntimeObservation("invalid"))
+
+
+def test_discovery_reaches_sibling_host_gateway(tmp_path, monkeypatch):
+    """A named profile served by a sibling-host gateway must attach, not wait out the deadline.
+
+    Regression for PR #106742 review: discovery only asked the requested home and the
+    default root, so siblings of a ``profiles/<host>`` owner reported "starting" until
+    the deadline. The host record names the live owner whatever home launched it.
+    Socket-free: fakes ``query_identify`` so it runs on every platform.
+    """
+    import os
+    from pathlib import Path
+
+    from gateway.host_attach import HostGateway
+    import gateway.host_attach as host_attach
+    import hermes_cli.gateway_runtime_discovery as discovery
+
+    from hermes_cli.gateway_runtime import discover_gateway_endpoint
+
+    host = tmp_path / "host-profile"
+    client = tmp_path / "client-profile"
+    client.mkdir(mode=0o700)
+    host_id = str(host.resolve())
+    client_id = str(client.resolve())
+    payload = {
+        "protocol": 1,
+        "runtime_protocol": 1,
+        "instance_id": "sibling-host-instance",
+        "authority_epoch": 3,
+        "hermes_home": host_id,
+        "pid": os.getpid(),
+        "state": "ready",
+        "api_origin": "http://127.0.0.1:41819",
+        "supervisor": "none",
+        "served_profiles": [
+            {"profile_id": host_id, "home": host_id},
+            {"profile_id": client_id, "home": client_id},
+        ],
+        "capabilities": ["session-authority-v1"],
+    }
+
+    def fake_identify(home, timeout=2.0):
+        if os.path.normcase(str(Path(home).resolve())) == os.path.normcase(host_id):
+            return dict(payload)
+        raise FileNotFoundError(str(home))
+
+    monkeypatch.setattr(discovery, "query_identify", fake_identify)
+    monkeypatch.setattr(
+        host_attach,
+        "host_gateway",
+        lambda wait_for_channel=0.0: HostGateway(
+            pid=os.getpid(), home=Path(host), profiles=("host-profile", "client-profile"),
+        ),
+    )
+    observed = discover_gateway_endpoint(client, timeout=2)
+    assert observed.state == "ready", observed
+    assert observed.endpoint.profile_id == client_id
+    assert observed.endpoint.control_home == str(host)
+    assert observed.endpoint.instance_id == "sibling-host-instance"
+
+
+def test_discovery_ignores_host_gateway_that_does_not_serve_us(tmp_path, monkeypatch):
+    """A host gateway serving someone else must not mask an absent profile."""
+    import os
+    from pathlib import Path
+
+    from gateway.host_attach import HostGateway
+    import gateway.host_attach as host_attach
+    import hermes_cli.gateway_runtime_discovery as discovery
+
+    from hermes_cli.gateway_runtime import discover_gateway_endpoint
+
+    host = tmp_path / "host-profile"
+    client = tmp_path / "client-profile"
+    client.mkdir(mode=0o700)
+    host_id = str(host.resolve())
+    payload = {
+        "protocol": 1,
+        "runtime_protocol": 1,
+        "instance_id": "other-host-instance",
+        "authority_epoch": 3,
+        "hermes_home": host_id,
+        "pid": os.getpid(),
+        "state": "ready",
+        "api_origin": "http://127.0.0.1:41819",
+        "supervisor": "none",
+        "served_profiles": [{"profile_id": host_id, "home": host_id}],
+        "capabilities": ["session-authority-v1"],
+    }
+
+    def fake_identify(home, timeout=2.0):
+        if os.path.normcase(str(Path(home).resolve())) == os.path.normcase(host_id):
+            return dict(payload)
+        raise FileNotFoundError(str(home))
+
+    monkeypatch.setattr(discovery, "query_identify", fake_identify)
+    monkeypatch.setattr(
+        host_attach,
+        "host_gateway",
+        lambda wait_for_channel=0.0: HostGateway(
+            pid=os.getpid(), home=Path(host), profiles=("host-profile",),
+        ),
+    )
+    observed = discover_gateway_endpoint(client, timeout=2)
+    assert observed.state == "absent", observed

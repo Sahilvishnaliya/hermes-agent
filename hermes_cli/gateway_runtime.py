@@ -157,6 +157,49 @@ def _served_by_multiplexer(home: Path, *, timeout: float) -> GatewayDiscovery | 
     return result
 
 
+def _served_by_host_gateway(home: Path, *, timeout: float) -> GatewayDiscovery | None:
+    """A named profile served by a host gateway launched from a sibling profile home.
+
+    The default-multiplexer probe above only asks the requested home and the default root.
+    Multiplex-only means "the one host process, whichever profile started it": when a named
+    profile (e.g. ``profiles/alpha``) hosts the gateway serving the root and its siblings,
+    asking the default root misses and the sibling waits out the deadline as "starting".
+    The host record names the live owner whatever home launched it, so probe that home's
+    live descriptor and match it against the requested profile. Only a live ``identify``
+    proves service; the record alone never does.
+    """
+    from hermes_cli.gateway_runtime_discovery import DiscoveryError, query_identify
+    try:
+        from gateway.host_attach import host_gateway
+        host = host_gateway()
+    except Exception:
+        return None
+    if host is None or not getattr(host, "served_known", True):
+        return None
+    try:
+        host_home = Path(host.home)
+    except Exception:
+        return None
+    if _canonical_home(host_home) == _canonical_home(home):
+        return None
+    try:
+        from hermes_cli.gateway_runtime_multiplex import multiplexer_root_for
+        default_root = multiplexer_root_for(home)
+    except Exception:
+        default_root = None
+    if default_root is not None and _canonical_home(host_home) == _canonical_home(default_root):
+        return None
+    try:
+        payload = query_identify(host_home, timeout=timeout)
+    except (FileNotFoundError, ConnectionRefusedError, TimeoutError, DiscoveryError, PermissionError,
+            OSError, ValueError, TypeError):
+        return None
+    result = _endpoint(payload, home, control_home=host_home)
+    if result.state == "inaccessible" and result.reason_code == "profile_mismatch":
+        return _parked_by_multiplexer(payload, home)
+    return result
+
+
 def discover_gateway_endpoint(profile_home: str | Path, *, timeout: float = 2.0) -> GatewayDiscovery:
     """Read live control identity, preserving uncertainty instead of spawning.
 
@@ -174,6 +217,9 @@ def discover_gateway_endpoint(profile_home: str | Path, *, timeout: float = 2.0)
         served = _served_by_multiplexer(home, timeout=timeout)
         if served is not None:
             return served
+        hosted = _served_by_host_gateway(home, timeout=timeout)
+        if hosted is not None:
+            return hosted
         return GatewayDiscovery(missing_owner_state(home))
     except TimeoutError:
         return GatewayDiscovery("inaccessible", reason_code="control_timeout")
