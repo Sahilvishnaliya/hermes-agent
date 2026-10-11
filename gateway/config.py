@@ -21,6 +21,7 @@ from gateway.shutdown_watchdog import (
 )
 from utils import fast_safe_load, is_truthy_value
 
+from __future__ import annotations
 logger = logging.getLogger(__name__)
 
 _TRUTHY_STRINGS = frozenset({"1", "true", "yes", "on"})
