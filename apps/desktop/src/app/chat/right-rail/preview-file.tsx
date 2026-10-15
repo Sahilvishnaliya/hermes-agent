@@ -33,7 +33,7 @@ import {
   writeDesktopFileText
 } from '@/lib/desktop-fs'
 import { ExternalLink } from '@/lib/external-link'
-import { Check, Pencil, X } from '@/lib/icons'
+import { Check, Download, Pencil, X } from '@/lib/icons'
 import { createMemoizedMathPlugin } from '@/lib/katex-memo'
 import { isComposerChord } from '@/lib/keybinds/chords'
 import { normalizeOrLocalPreviewTarget } from '@/lib/local-preview'
@@ -48,6 +48,7 @@ import {
 } from '@/lib/preview-markdown-links'
 import { previewTargetFromMarkdownHref } from '@/lib/preview-targets'
 import { cn } from '@/lib/utils'
+import { notify } from '@/store/notifications'
 import { markPreviewTabMissing, openPreview, type PreviewTarget } from '@/store/preview'
 import { setPreviewDirty } from '@/store/preview-edit'
 import { $connection, $currentCwd } from '@/store/session'
@@ -942,6 +943,62 @@ export function LocalFilePreview({
     return () => URL.revokeObjectURL(objectUrl)
   }, [isPdf, state.dataUrl])
 
+  // #135703: the preview pane must never reach the native print path. On the
+  // pinned Electron 40 the print dialog dereferences a nilled print_info_
+  // (upstream electron/electron#50843, fixed in 42.x) and SIGSEGVs the whole
+  // app — from the viewer's toolbar Print button as well as Cmd/Ctrl+P. The
+  // viewer toolbar therefore stays hidden (see `#toolbar=0` on the iframe
+  // below), the keyboard chord is intercepted into a download, and the header
+  // offers the safe route explicitly: download, then print externally.
+  const downloadPdf = useCallback(() => {
+    if (!pdfUrl) {
+      return
+    }
+
+    const anchor = document.createElement('a')
+    anchor.href = pdfUrl
+    anchor.download = target.label || 'document.pdf'
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+  }, [pdfUrl, target.label])
+
+  useEffect(() => {
+    if (!isPdf || !pdfUrl) {
+      return
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        !event.altKey &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === 'p'
+      ) {
+        event.preventDefault()
+        event.stopPropagation()
+        downloadPdf()
+        notify({
+          id: 'pdf-print-disabled',
+          kind: 'warning',
+          message:
+            'In-app PDF printing is disabled: it crashes the app (see #135703). The file was downloaded instead — print it from your system viewer.',
+          title: 'Printing is disabled in the PDF preview'
+        })
+      }
+    }
+
+    // The pane's tests stub `window` with a plain object (no EventTarget
+    // methods); guard so the preview still renders there.
+    if (typeof window.addEventListener !== 'function') {
+      return
+    }
+
+    window.addEventListener('keydown', onKeyDown, true)
+
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [downloadPdf, isPdf, pdfUrl])
+
   // Editing is only offered for whole, readable text — never images, binaries,
   // or files we only loaded the first 512 KB of (saving would drop the tail).
   const canEdit =
@@ -1195,13 +1252,34 @@ export function LocalFilePreview({
 
   if (isPdf && state.dataUrl && pdfUrl) {
     return (
-      <div className="h-full w-full overflow-hidden bg-transparent">
-        <iframe
-          aria-label={target.label}
-          className="h-full w-full border-0 bg-white"
-          src={pdfUrl}
-          title={target.label}
-        />
+      <div className="flex h-full w-full flex-col overflow-hidden bg-transparent">
+        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border/60 px-3">
+          <span className="min-w-0 flex-1 truncate text-[0.7rem] font-medium text-muted-foreground">
+            {target.label}
+          </span>
+          <span className="hidden shrink-0 text-[0.65rem] text-muted-foreground/70 xl:inline">
+            In-app printing is disabled (app crash #135703) — download and print externally
+          </span>
+          <Tip label="Download PDF">
+            <button
+              aria-label="Download PDF"
+              className="flex items-center gap-1 rounded-md px-1.5 text-[0.625rem] font-bold text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              onClick={downloadPdf}
+              type="button"
+            >
+              <Download className="size-3" />
+              Download
+            </button>
+          </Tip>
+        </div>
+        <div className="min-h-0 flex-1">
+          <iframe
+            aria-label={target.label}
+            className="h-full w-full border-0 bg-white"
+            src={`${pdfUrl}#toolbar=0`}
+            title={target.label}
+          />
+        </div>
       </div>
     )
   }

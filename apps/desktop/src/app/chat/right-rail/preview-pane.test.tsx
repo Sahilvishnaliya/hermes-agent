@@ -676,7 +676,7 @@ describe('PreviewPane console state', () => {
     await waitFor(() => expect(rendered.container.querySelector('iframe')).not.toBeNull(), {
       container: rendered.container
     })
-    expect(rendered.container.querySelector('iframe')?.getAttribute('src')).toBe('blob:pdf-preview-1')
+    expect(rendered.container.querySelector('iframe')?.getAttribute('src')).toBe('blob:pdf-preview-1#toolbar=0')
     expect(readFileDataUrl).toHaveBeenCalledWith('/tmp/spec.pdf')
     const blob = createObjectURL.mock.calls[0]?.[0]
 
@@ -703,7 +703,7 @@ describe('PreviewPane console state', () => {
       container: rendered.container
     })
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:pdf-preview-1')
-    expect(rendered.container.querySelector('iframe')?.getAttribute('src')).toBe('blob:pdf-preview-2')
+    expect(rendered.container.querySelector('iframe')?.getAttribute('src')).toBe('blob:pdf-preview-2#toolbar=0')
 
     rendered.unmount()
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:pdf-preview-2')
@@ -739,7 +739,71 @@ describe('PreviewPane console state', () => {
     await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1), {
       container: rendered.container
     })
-    expect(rendered.container.querySelector('iframe')?.getAttribute('src')).toBe('blob:pdf-preview-1')
+    expect(rendered.container.querySelector('iframe')?.getAttribute('src')).toBe('blob:pdf-preview-1#toolbar=0')
+  })
+
+  it('disables in-app PDF printing (#135703) and downloads instead', async () => {
+    const dataUrl = 'data:application/pdf;base64,JVBERi0xLjQ='
+    const readFileDataUrl = vi.fn(async () => dataUrl)
+    stubPdfObjectUrls()
+    $connection.set({ mode: 'local' } as never)
+    vi.stubGlobal('window', {
+      ...window,
+      // The pane's other tests stub `window` with a plain object; this test
+      // needs a working event target for the print guard.
+      addEventListener: window.addEventListener.bind(window),
+      dispatchEvent: window.dispatchEvent.bind(window),
+      removeEventListener: window.removeEventListener.bind(window),
+      hermesDesktop: {
+        readFileDataUrl
+      }
+    })
+
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+    let rendered!: ReturnType<typeof render>
+    await act(async () => {
+      rendered = render(
+        <PreviewPane
+          target={{
+            kind: 'file',
+            label: 'spec.pdf',
+            path: '/tmp/spec.pdf',
+            previewKind: 'pdf',
+            source: '/tmp/spec.pdf',
+            url: 'file:///tmp/spec.pdf'
+          }}
+        />
+      )
+    })
+
+    await waitFor(() => expect(rendered.container.querySelector('iframe')).not.toBeNull(), {
+      container: rendered.container
+    })
+
+    // The viewer toolbar (whose Print button SIGSEGVs the app) stays hidden.
+    expect(rendered.container.querySelector('iframe')?.getAttribute('src')).toBe('blob:pdf-preview-1#toolbar=0')
+
+    // The header offers the safe route: download, then print externally.
+    const download = rendered.getByRole('button', { name: 'Download PDF' })
+    fireEvent.click(download)
+    expect(anchorClick).toHaveBeenCalledTimes(1)
+
+    // Cmd+P never reaches the native print path: it is intercepted into a
+    // download instead.
+    anchorClick.mockClear()
+    const printKey = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'p', metaKey: true })
+    window.dispatchEvent(printKey)
+    expect(printKey.defaultPrevented).toBe(true)
+    expect(anchorClick).toHaveBeenCalledTimes(1)
+
+    // An ordinary keypress is untouched.
+    const plainKey = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'p' })
+    window.dispatchEvent(plainKey)
+    expect(plainKey.defaultPrevented).toBe(false)
+    expect(anchorClick).toHaveBeenCalledTimes(1)
+
+    anchorClick.mockRestore()
   })
 
   it.each([
