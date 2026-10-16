@@ -953,21 +953,82 @@ def _recover_auth_failure(agent, pool, *, status_code, has_retried_429, error_co
     # try_refresh_matching() reports success even when upstream keeps rejecting; cap same-entry
     # refreshes so a single-entry pool falls through to fallback.
     refreshed_id = getattr(refreshed, "id", None)
-    if refreshed_id is not None:
+    cap_id = credential_id or refreshed_id
+    if cap_id is None and api_key_hint:
+        try:
+            hint_entry = next((e for e in pool.entries() if e.runtime_api_key == api_key_hint), None)
+            if hint_entry is not None:
+                cap_id = getattr(hint_entry, "id", None)
+        except Exception:
+            pass
+    if cap_id is None:
+        try:
+            cur = pool.current()
+            cap_id = getattr(cur, "id", None) if cur is not None else refreshed_id
+        except Exception:
+            cap_id = refreshed_id
+    if cap_id is not None:
         if getattr(agent, "_auth_pool_refresh_counts", None) is None:
             agent._auth_pool_refresh_counts = {}
         refresh_counts = agent._auth_pool_refresh_counts
-        refresh_key = (agent.provider, refreshed_id)
+        refresh_key = (agent.provider, cap_id)
         refresh_counts[refresh_key] = refresh_counts.get(refresh_key, 0) + 1
         if refresh_counts[refresh_key] > _MAX_AUTH_REFRESH_ATTEMPTS:
             _ra().logger.warning(
                 "Credential auth failure persists after %s refreshes for "
                 "pool entry %s — treating as unrecoverable and allowing "
-                "fallback to activate.", refresh_counts[refresh_key] - 1, refreshed_id,
+                "fallback to activate.", refresh_counts[refresh_key] - 1, cap_id,
             )
+            # Explicitly bench the persistently-failing credential so a
+            # single-entry pool (rotation yields None) still leaves it
+            # STATUS_EXHAUSTED instead of silently reusable.
+            try:
+                mark_fn = getattr(pool, "mark_exhausted", None)
+                if callable(mark_fn):
+                    try:
+                        mark_fn(cap_id, status_code=status_code, error_context=error_context)
+                    except TypeError:
+                        mark_fn(cap_id)
+                else:
+                    live = None
+                    try:
+                        live = next((e for e in pool.entries() if e.id == cap_id), None)
+                    except Exception:
+                        live = None
+                    target = live if live is not None else refreshed
+                    mark_private = getattr(pool, "_mark_exhausted", None)
+                    if callable(mark_private) and target is not None:
+                        try:
+                            mark_private(target, status_code, error_context, failure_reason="auth")
+                        except TypeError:
+                            mark_private(target, status_code)
+                    else:
+                        rotate_kwargs: dict[str, Any] = {
+                            "status_code": status_code if status_code is not None else 401,
+                            "error_context": error_context,
+                            "failure_reason": "auth",
+                        }
+                        if api_key_hint:
+                            rotate_kwargs["api_key_hint"] = api_key_hint
+                        if credential_id:
+                            rotate_kwargs["credential_id"] = credential_id
+                        elif cap_id:
+                            rotate_kwargs["credential_id"] = cap_id
+                        pool.mark_exhausted_and_rotate(**rotate_kwargs)
+            except Exception:
+                pass
             return False, has_retried_429
     _ra().logger.info("Credential auth failure — refreshed pool entry %s", getattr(refreshed, 'id', '?'))
     if agent._swap_credential(refreshed) is False:
+        try:
+            mark_fn = getattr(pool, "mark_exhausted", None)
+            if callable(mark_fn):
+                try:
+                    mark_fn(getattr(refreshed, "id", None), status_code=status_code, error_context=error_context)
+                except TypeError:
+                    mark_fn(getattr(refreshed, "id", None))
+        except Exception:
+            pass
         return False, has_retried_429
     return True, has_retried_429
 
@@ -1115,6 +1176,32 @@ def recover_with_credential_pool(
         # match the key that failed, not a different account.
         return (True, False) if _rotate_and_swap(402, "billing") else (False, has_retried_429)
     if effective_reason == FailoverReason.rate_limit:
+        # A 429 is a quota signal, not an auth signal: the 401 refresh tally
+        # for THIS credential is stale, but other entries' tallies must stay.
+        # Pop only the current (provider, credential_id) key — never clear
+        # the whole dict (that would un-cap every other entry's 401 loop).
+        try:
+            counts = getattr(agent, "_auth_pool_refresh_counts", None)
+            if isinstance(counts, dict):
+                reset_id = credential_id
+                if reset_id is None and api_key_hint:
+                    try:
+                        hint_entry = next(
+                            (e for e in pool.entries() if e.runtime_api_key == api_key_hint), None
+                        )
+                        reset_id = getattr(hint_entry, "id", None) if hint_entry is not None else None
+                    except Exception:
+                        reset_id = None
+                if reset_id is None:
+                    try:
+                        cur = pool.current()
+                        reset_id = getattr(cur, "id", None) if cur is not None else None
+                    except Exception:
+                        reset_id = None
+                if reset_id is not None:
+                    counts.pop((agent.provider, reset_id), None)
+        except Exception:
+            pass
         return _recover_rate_limit(
             pool, has_retried_429=has_retried_429, error_context=error_context,
             api_key_hint=api_key_hint, credential_id=credential_id, rotate_and_swap=_rotate_and_swap,

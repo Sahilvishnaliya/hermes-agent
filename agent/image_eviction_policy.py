@@ -21,7 +21,10 @@ request-size limit usually binds first, which the byte budget guards with headro
 
 from __future__ import annotations
 
+import logging
 from typing import Optional, Sequence
+
+logger = logging.getLogger(__name__)
 
 OUTBOUND_IMAGE_LIMIT = 20
 OUTBOUND_IMAGE_BUDGET_BYTES = 24_000_000
@@ -86,11 +89,23 @@ def outbound_image_retire_count(
     if max_retire <= 0:
         return 0
     window = max(k for k in range(total + 1) if _fits(k)) if _fits(0) else 0
-    quantum = max(1, min(batch, window - floor))
+    quantum = max(2 if total > floor else 1, min(batch, window - floor))
 
     retire = 0
     while retire < max_retire:
         retire = min(retire + quantum, max_retire)
         if _fits(total - retire):
             break
+    if retire >= max_retire and not _fits(total - retire):
+        logger.warning(
+            "image eviction unfixable breach: reserved_blocks=%d reserved_bytes=%d "
+            "total=%d retire=%d max_retire=%d kept=%d limit=%d",
+            reserved_blocks,
+            reserved_bytes,
+            total,
+            retire,
+            max_retire,
+            total - retire,
+            limit,
+        )
     return retire

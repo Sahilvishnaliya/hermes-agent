@@ -41,7 +41,11 @@ import os
 import stat
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone, UTC
+from datetime import datetime, timezone
+try:
+    from datetime import UTC
+except ImportError:  # py3.10 compat
+    UTC = timezone.utc
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
@@ -244,6 +248,10 @@ def _record_incarnation_matches(record: HostRecord) -> Optional[bool]:
     the create-time check until their owner republishes them.
     """
     if record.start_time is None:
+        if record.create_time is None:
+            # No incarnation proof at all: must not vouch for a recycled pid.
+            # _same_incarnation treats None as match, so fail closed here.
+            return None
         return _pid_incarnation_matches(record.pid, record.create_time)
     alive = _pid_incarnation_matches(record.pid, None)
     if alive is not True:

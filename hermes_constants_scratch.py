@@ -277,6 +277,11 @@ def _prune_idle_entries(
     removed = 0
     for entry in doomed:
         size = _tree_bytes(entry)
+        # Re-validate just before deletion: the entry may have become active
+        # while reaping processes or sizing earlier entries.
+        cutoff = time.time() - max_idle_hours * 3600
+        if subtree_touched_since(entry, cutoff):
+            continue
         try:
             if entry.is_dir() and not entry.is_symlink():
                 repos |= _linked_worktree_repos(entry)

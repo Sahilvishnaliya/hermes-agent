@@ -16,12 +16,35 @@ from agent.provider_base import ProviderBase
 _JPEG_SOF_MARKERS = frozenset({0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF})
 
 def image_dimensions_from_bytes(raw: bytes) -> Optional[tuple[int, int]]:
-    """(width, height) for PNG / JPEG bytes, or None when unreadable. PNG: IHDR. JPEG: walk
-    segments (skipping 0xFF fill bytes) to the first SOF marker; stop at SOS. Used by the
-    tool layer's provider min-size guard."""
+    """(width, height) for PNG / JPEG / GIF / WebP bytes, or None when unreadable. PNG: IHDR.
+    JPEG: walk segments (skipping 0xFF fill bytes) to the first SOF marker; stop at SOS. GIF:
+    logical-screen descriptor at bytes 6:10 little-endian. WebP (RIFF....WEBP): VP8 keyframe
+    dims, VP8X canvas dims minus 1, VP8L bits-packed dims minus 1. None means unsafe. Used by
+    the tool layer's provider min-size guard."""
     if raw.startswith(b"\x89PNG\r\n\x1a\n") and len(raw) >= 24:
         width, height = struct.unpack(">II", raw[16:24])  # cannot fail: 8 bytes are guaranteed present
         return int(width), int(height)
+    if raw.startswith((b"GIF87a", b"GIF89a")) and len(raw) >= 10:
+        gif_w, gif_h = struct.unpack("<HH", raw[6:10])  # cannot fail: 4 bytes are guaranteed present
+        return int(gif_w), int(gif_h)
+    if raw.startswith(b"RIFF") and len(raw) >= 12 and raw[8:12] == b"WEBP":
+        chunk = raw[12:16] if len(raw) >= 16 else b""
+        if chunk == b"VP8 " and len(raw) >= 30 and raw[23:26] == b"\x9d\x01\x2a":
+            vp8_w = int.from_bytes(raw[26:28], "little") & 0x3FFF
+            vp8_h = int.from_bytes(raw[28:30], "little") & 0x3FFF
+            if vp8_w > 0 and vp8_h > 0:
+                return int(vp8_w), int(vp8_h)
+            return None
+        if chunk == b"VP8X" and len(raw) >= 30:
+            vp8x_w = int.from_bytes(raw[24:27], "little") + 1
+            vp8x_h = int.from_bytes(raw[27:30], "little") + 1
+            return int(vp8x_w), int(vp8x_h)
+        if chunk == b"VP8L" and len(raw) >= 25 and raw[20] == 0x2F:
+            bits = int.from_bytes(raw[21:25], "little")
+            vp8l_w = (bits & 0x3FFF) + 1
+            vp8l_h = ((bits >> 14) & 0x3FFF) + 1
+            return int(vp8l_w), int(vp8l_h)
+        return None
     if raw.startswith(b"\xff\xd8") and len(raw) > 4:
         i = 2
         while i + 9 < len(raw):

@@ -102,6 +102,10 @@ _MESSAGE_TYPE_BY_KIND = {
     "location": MessageType.TEXT, "contacts": MessageType.TEXT,
 }
 _HTTP_PREFIXES = ("http://", "https://")
+# Business-Scoped User ID (BSUID rotation, Aug 2026): ``XX.<opaque-token>``. Broad
+# routing detector (fail-closed) — any match takes the strict exact-match path;
+# canonical comparison itself stays exact (case-sensitive ``in``).
+_BSUID_RE = re.compile(r"^[A-Za-z]{2}\.[A-Za-z0-9_-]{1,256}$")
 
 
 def _interactive_inner(raw_message: dict[str, Any]) -> dict[str, Any]:
@@ -239,15 +243,46 @@ class WhatsAppCloudAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
 
     @staticmethod
     def _normalize_allow_ids(ids: set[str]) -> set[str]:
-        """Normalize allowlist entries to bare wa_id (digits): strip ``@...`` JID suffixes and non-digits."""
-        return {re.sub(r"\D", "", entry.split("@", 1)[0]) or entry for entry in ids}
+        """Normalize allowlist entries: strip ``@...`` JID suffixes; preserve BSUID verbatim
+        (exact-match only); for phones store both verbatim bare and digits so
+        ``12345`` vs ``+1 2345`` with same digits still match."""
+        normalized: set[str] = set()
+        for entry in ids or ():
+            bare = str(entry).split("@", 1)[0].strip()
+            if not bare:
+                continue
+            if _BSUID_RE.match(bare):
+                normalized.add(bare)
+                continue
+            digits = re.sub(r"\D", "", bare)
+            if digits:
+                normalized.add(digits)
+                normalized.add(bare)
+            else:
+                normalized.add(bare)
+        return normalized
 
     def _entry_matches(self, entries, target: str) -> bool:
         """Bare-wa_id membership first (Cloud senders are digits), then the shared WhatsApp matcher
-        so ``*`` and phone/LID aliases keep working for DM intake and groups as they always did."""
+        so ``*`` and phone/LID aliases keep working for DM intake and groups as they always did.
+        BSUID-like principals route to exact-match only and never delegate to
+        ``super()._entry_matches``; any allowlist containing a BSUID stays strict too."""
+        if not str(target).strip():
+            return False
         entries = set(entries or ())
-        bare = re.sub(r"\D", "", str(target).split("@", 1)[0]) or target
-        return bare in self._normalize_allow_ids(entries) or super()._entry_matches(entries, target)
+        normalized = self._normalize_allow_ids(entries)
+        bare_target = str(target).split("@", 1)[0].strip()
+        if not bare_target:
+            return False
+        if _BSUID_RE.match(bare_target):
+            return bare_target in normalized
+        if any(_BSUID_RE.match(e) for e in normalized):
+            digits_target = re.sub(r"\D", "", bare_target)
+            return bare_target in normalized or (bool(digits_target) and digits_target in normalized)
+        digits = re.sub(r"\D", "", bare_target)
+        if bare_target in normalized or (digits and digits in normalized):
+            return True
+        return super()._entry_matches(entries, target)
 
     def _webhook_identity_matches(self, entry_id: Any, metadata: Any) -> bool:
         """Bind a signed callback to this adapter's configured Meta identities."""

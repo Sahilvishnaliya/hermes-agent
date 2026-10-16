@@ -2414,6 +2414,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         must consume a rotating refresh token exactly once.
         """
         with self._lock:
+            has_hint = bool(credential_id or api_key_hint)
             entry = self._find(lambda e: e.id == credential_id) if credential_id else None
             if entry is None:
                 if api_key_hint:
@@ -2423,6 +2424,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             if entry is None:
                 return None
             self._current_id = entry.id
+            if not has_hint and not self._entry_needs_refresh(entry):
+                return entry
             return self._try_refresh_current_unlocked()
 
     def _try_refresh_current_unlocked(self) -> Optional[PooledCredential]:

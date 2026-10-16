@@ -83,19 +83,65 @@ def cleanup_terminal_temp_cache(max_age_hours: float = TERMINAL_TEMP_MAX_IDLE_HO
         if m := _BG_GROUP_RE.match(f.name):
             group_newest[m.group(1)] = max(group_newest.get(m.group(1), 0.0), mt)
 
-    removed = 0
+    # Collect candidates first so a bg triplet (hermes_bg_<id>.log/.pid/.exit)
+    # is judged and removed as a group: a .log written after the initial scan
+    # must keep its .pid/.exit instead of leaving a partial group behind.
+    loose: list[Path] = []
+    stems: set[str] = set()
     for f, mt in mtimes.items():
         m = _BG_GROUP_RE.match(f.name)
         if m:
             if group_newest[m.group(1)] >= cutoff:
                 continue
+            stems.add(m.group(1))
         elif subtree_touched_since(f, cutoff):
             continue
+        else:
+            loose.append(f)
+
+    def _remove_one(path: Path) -> bool:
+        """Delete *path*; True only when it is really gone (lstat-verified)."""
         try:
-            shutil.rmtree(f, ignore_errors=True) if f.is_dir() else f.unlink()
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return False
+
+    removed = 0
+    for f in loose:
+        # Re-validate just before deletion: fresh cutoff, fresh walk.
+        if subtree_touched_since(f, time.time() - (max_age_hours * 3600)):
+            continue
+        if _remove_one(f):
             removed += 1
+    for stem in sorted(stems):
+        fresh_cutoff = time.time() - (max_age_hours * 3600)
+        try:
+            members: list[Path] = []
+            for p in root.iterdir():
+                gm = _BG_GROUP_RE.match(p.name)
+                if gm and gm.group(1) == stem:
+                    members.append(p)
         except OSError:
             continue
+        if not members:
+            continue
+        if any(subtree_touched_since(p, fresh_cutoff) for p in members):
+            continue
+        for p in members:
+            if _remove_one(p):
+                removed += 1
     return removed
 
 
