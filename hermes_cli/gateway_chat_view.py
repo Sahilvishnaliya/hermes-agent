@@ -1,4 +1,4 @@
-"""Classic terminal presentation of authority events and fenced controls."""
+﻿"""Classic terminal presentation of authority events and fenced controls."""
 import asyncio
 from contextlib import suppress
 import logging
@@ -22,7 +22,7 @@ def _pending_preview(text):
         return ""
     line = " ".join("".join(ch if ch.isprintable() else " " for ch in strip_ansi(text)).split())
     if len(line) > _PREVIEW_CHARS:
-        line = line[:_PREVIEW_CHARS - 1] + "…"
+        line = line[:_PREVIEW_CHARS - 1] + "ΓÇª"
     return f": {line}" if line else ""
 
 
@@ -52,6 +52,7 @@ class GatewayChatView:
         self.finite_admission = None
         self._finite_events = []
         self.streams = {}
+        self._accumulated_text = {}
         self.completions = {}
         self.changed = asyncio.Event()
         self.failure = None
@@ -195,12 +196,17 @@ class GatewayChatView:
             return
         if self.emitter is not None:
             self.emitter.on_text_delta(text)
-        elif not self.quiet:
-            self.streams[admission] = self.streams.get(admission, "") + text
-            # No flush: under the live composer, patch_stdout line-buffers this so a redraw
-            # (a resize mid-stream) never interleaves with a half-written line. Complete lines
-            # still appear as they stream; the last one lands with `_complete`.
-            print(text, end="")
+        else:
+            # Accumulate the reply even in quiet/unattended mode so a `-z` run that
+            # receives deltas (but no final `text` field) still has text to print and
+            # to base its exit code on. (#139828)
+            self._accumulated_text[admission] = self._accumulated_text.get(admission, "") + text
+            if not self.quiet:
+                self.streams[admission] = self.streams.get(admission, "") + text
+                # No flush: under the live composer, patch_stdout line-buffers this so a redraw
+                # (a resize mid-stream) never interleaves with a half-written line. Complete lines
+                # still appear as they stream; the last one lands with `_complete`.
+                print(text, end="")
 
     def _complete(self, admission, payload):
         text = payload.get("text") or payload.get("content") or ""
@@ -365,7 +371,7 @@ class GatewayChatView:
         return None
 
     async def _settled_result(self, admission):
-        """The structured result the owner committed with this admission's settlement — the same
+        """The structured result the owner committed with this admission's settlement ΓÇö the same
         dict the in-process one-shot got from ``run_conversation`` (best-effort, never raises)."""
         from websockets.exceptions import WebSocketException
         try:
@@ -443,6 +449,8 @@ class GatewayChatView:
                 terminal = self.completions[admission]
                 outcome = terminal.get("outcome")
                 text = terminal.get("text") or terminal.get("content") or ""
+                if not (text or "").strip():
+                    text = self._accumulated_text.get(admission, "") or text
                 # The outcome only says failed/cancelled; a turn stopped by --max-turns settles
                 # 'completed' with ``completed: False`` in its committed result. Judge both with the
                 # in-process exit contracts: `-z` 0/2/130 (1 = no text), `chat -q`/`-Q` 0/1/130.
@@ -473,7 +481,7 @@ class GatewayChatView:
             # The classic status bar's leading segments: model, then the attached session.
             prompt = PromptSession(erase_when_done=True,
                                    bottom_toolbar=lambda: f" \u2624 {self.model} \u2502 {self.session_id} ")
-            prompt_symbol = get_active_prompt_symbol("❯ ")
+            prompt_symbol = get_active_prompt_symbol("Γ¥» ")
             self._composer = prompt if sys.stdin.isatty() else None
             with patch_stdout():
                 while not self.failure:
@@ -487,8 +495,8 @@ class GatewayChatView:
                                 return 0
                         else:
                             # Same scrollback shape as the in-process CLI: the typed prompt line is
-                            # erased on submit and the message lands as a `●` preview row.
-                            print(f"\n{'─' * 40}\n● {text}", flush=True)
+                            # erased on submit and the message lands as a `ΓùÅ` preview row.
+                            print(f"\n{'ΓöÇ' * 40}\nΓùÅ {text}", flush=True)
                             await self.submit(text)
                     except KeyboardInterrupt:
                         print("Use /stop to interrupt execution, /quit to detach.")
