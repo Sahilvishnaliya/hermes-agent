@@ -145,3 +145,45 @@ def test_turn_settles_before_post_turn_trim(turn_stubs, monkeypatch, caplog, set
     finally:
         release.set()
         session["_run_thread"].join(timeout=5)
+
+
+@pytest.mark.parametrize("failing_step", ["scope_release", "inflight_clear", "hosted_room_slot"])
+def test_a_raising_settle_step_still_settles_the_session(turn_env, monkeypatch, caplog, failing_step):
+    """Nothing raised on the settle path may skip the settlement (#131740).
+
+    A raise there used to leave the session ``running`` forever (Desktop: permanently
+    "thinking", Stop ineffective, later prompts rejected as "session busy") and lose the
+    ``tui turn finished`` bookend, so only the turn-liveness watchdog could clear the turn.
+    """
+    def boom(*_a, **_kw):
+        raise RuntimeError("settle step failed")
+
+    name = {
+        "scope_release": "_release_turn_scopes",
+        "inflight_clear": "_clear_inflight_turn",
+        "hosted_room_slot": "_release_hosted_room_turn_slot",
+    }[failing_step]
+    original = getattr(server, name)
+    calls = {"n": 0}
+
+    def fail_on_the_settle_call(*a, **kw):
+        calls["n"] += 1
+        # `_clear_inflight_turn` also runs while the turn payload is built; only its
+        # settle-path call is the one this contract is about.
+        if calls["n"] == 1 and name == "_clear_inflight_turn":
+            return original(*a, **kw)
+        raise RuntimeError("settle step failed")
+
+    monkeypatch.setattr(server, name, fail_on_the_settle_call)
+
+    agent = types.SimpleNamespace(
+        session_id="agent-sid-1", run_conversation=lambda *a, **k: {"final_response": "done"},
+        clear_interrupt=lambda: None)
+    session = _session(agent=agent, running=True)
+    monkeypatch.setattr(server, "_sessions", {"ui-sid": session})
+
+    with caplog.at_level(logging.INFO, logger="tui_gateway.server"):
+        server._run_prompt_submit("rid", "ui-sid", session, "hi")
+
+    assert session["running"] is False
+    assert len(_records(caplog, "tui turn finished")) == 1

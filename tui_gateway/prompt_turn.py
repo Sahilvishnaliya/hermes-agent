@@ -1175,10 +1175,21 @@ def _run_prompt_submit(
         except Exception as e:
             _recover_turn_exception(sid, session, st, e)
         finally:
-            _release_turn_scopes(sid, session, st)
+            # Settlement is fail-safe: nothing raised before `session["running"] = False` may
+            # escape this block. A raise here used to skip the settlement entirely — the session
+            # stayed `running` (Desktop: permanently "thinking", Stop ineffective, later prompts
+            # rejected as "session busy") and the "tui turn finished" bookend was never logged, so
+            # only the turn-liveness watchdog could clear the turn (#131740).
+            try:
+                _release_turn_scopes(sid, session, st)
+            except Exception:
+                logger.debug("turn scope release failed; the turn settles anyway", exc_info=True)
             try:  # a raising settle step must not skip the trim / HERMES_HOME reset
-                _current_runtime_session_record.reset(runtime_session_token)
-                reset_transport(transport_token)
+                try:  # a cross-context scope reset must not skip the settlement either
+                    _current_runtime_session_record.reset(runtime_session_token)
+                    reset_transport(transport_token)
+                except Exception:
+                    logger.debug("turn scope reset failed", exc_info=True)
                 # A stale interim closure must not fire during a later turn.
                 st.agent.interim_assistant_callback = None
                 with session["history_lock"]:
@@ -1186,8 +1197,14 @@ def _run_prompt_submit(
                     session["last_active"] = time.time()
                     session.pop("_turn_user_input", None)  # per turn: never leaks into the next one
                     if not st.error_retained:
-                        _clear_inflight_turn(session)
-                    _release_hosted_room_turn_slot(session)
+                        try:
+                            _clear_inflight_turn(session)
+                        except Exception:
+                            logger.debug("clearing the in-flight turn failed", exc_info=True)
+                    try:
+                        _release_hosted_room_turn_slot(session)
+                    except Exception:
+                        logger.debug("releasing the hosted-room turn slot failed", exc_info=True)
                 # Closing bookend of "tui prompt accepted" — exactly one per accepted prompt.
                 # agent.session_id is re-read because compression may have rotated it (an
                 # accepted/finished pair whose id changed IS a rotation trace).
