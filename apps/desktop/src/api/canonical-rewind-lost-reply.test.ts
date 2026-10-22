@@ -79,6 +79,44 @@ test('an explicit rewind (edit, regenerate, restore) stays keyed by its own targ
   expect(other).toMatchObject({ payload: { target_message_id: 3 } })
 })
 
+// A retained rewind is keyed by the SESSION, not by the command that asked for it: the /undo's
+// receipt is what the next /retry replays (as Ink's mutateCanonical does), and another session's
+// own rewind is never handed that receipt.
+test('a lost rewind is replayed by the next rewind of the same session, whatever the target', () => {
+  const protocol = primed()
+  const lost = protocol.prepare('session.rewind', derived(14))
+  protocol.failure(lost, new Error('Hermes gateway connection lost'))
+
+  // The /undo's reply is gone: the owner already rewound, so the transcript a new target would
+  // come from may hold no turn this command accepts. The retained rewind goes out again.
+  const retry = protocol.prepare('session.rewind', derived(11))
+
+  expect(retry).toEqual(lost)
+  expect(retry).toMatchObject({ payload: { target_message_id: 14 }, expected_revision: 7, expected_generation: 3 })
+})
+
+test('a retained rewind belongs to its session: another session derives its own target', () => {
+  const protocol = primed()
+  const lost = protocol.prepare('session.rewind', derived(14))
+  protocol.failure(lost, new Error('Hermes gateway connection lost'))
+
+  // The other session's rewind owes nothing of the lost one: it has its own revision and
+  // generation, and its own target.
+  protocol.result('session.resume', { session_id: 'other' }, { session_id: 'other', revision: 2, execution_generation: 1 })
+  const other = protocol.prepare('session.rewind', { session_id: 'other', target_message_id: 3, derived_target: true })
+
+  expect(other.request_id).not.toBe(lost.request_id)
+  expect(other).toMatchObject({ payload: { target_message_id: 3 }, expected_revision: 2, expected_generation: 1 })
+
+  // The replay-only probe of that session re-presents that session's own rewind, never the lost one.
+  const probe = protocol.prepare('session.rewind', {
+    session_id: 'other', derived_target: true, replay_only: true
+  })
+
+  expect(probe).toEqual(other)
+  expect(probe.request_id).not.toBe(lost.request_id)
+})
+
 test('an owner refusal that names a reason lets the next /undo derive again', () => {
   const protocol = primed()
   const refused = protocol.prepare('session.rewind', derived(5))
