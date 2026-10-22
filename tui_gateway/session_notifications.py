@@ -712,6 +712,10 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
     from tools import async_delegation
     from tools.process_registry import process_registry
     from tools.process_registry_notifications import format_process_notification
+    # Local import: this body is rebound onto server.py's globals, and the completion queue below
+    # shadows the ``queue`` module name there. The empty-queue signal is the only expected
+    # exception of a non-empty poll, so name it instead of swallowing every error.
+    from queue import Empty
     process_registry.restore_completions()  # first consumer in a TUI process (#123265)
     queue = process_registry.completion_queue
     emitted = session.setdefault("_notification_emitted", set())
@@ -736,13 +740,13 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
             _notif_poll_kanban(sid, session)
         try:
             evt = queue.get(timeout=0.5)
-        except Exception:
+        except Empty:
             continue
         ready = [evt]
         for _ in range(queue.qsize()):
             try:
                 ready.append(queue.get_nowait())
-            except Exception:
+            except Empty:
                 break
         try:
             handle(ready, None)
@@ -757,7 +761,7 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
     for _ in range(queue.qsize()):
         try:
             ready.append(queue.get_nowait())
-        except Exception:
+        except Empty:
             break
     handle(ready, deferred)
     for evt in deferred:

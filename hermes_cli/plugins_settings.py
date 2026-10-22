@@ -47,7 +47,7 @@ def _manifest_config_schema(plugin_dir: Optional[Path]) -> Mapping[str, Mapping[
         from utils import fast_safe_load
         data = fast_safe_load(manifest.read_text(encoding="utf-8-sig")) or {}
     except Exception as exc:  # unreadable manifest: no settings surface, never a failed list
-        logger.debug("plugin settings: cannot read %s: %s", manifest, exc)
+        logger.debug("plugin settings: cannot read %s: %s", manifest, exc, exc_info=True)
         return {}
     raw = data.get("config_schema") if isinstance(data, Mapping) else None
     if not isinstance(raw, Mapping):

@@ -668,7 +668,7 @@ def _release_session_resources(task_id: str, session_info: dict[str, Any]) -> No
         if provider is not None:
             try:
                 provider.close_session(bb_session_id)
-            except Exception as e:
+            except Exception as e:  # health: allow BLE001 -- teardown boundary moved unchanged from _release_session_resources; a provider error must never abort the daemon kill below
                 _bt.logger.warning("Could not close cloud browser session: %s", e)
 
     session_name = session_info.get("session_name", "")

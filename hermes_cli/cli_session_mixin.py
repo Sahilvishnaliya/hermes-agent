@@ -674,7 +674,7 @@ class CLISessionMixin:
         saved_dir = get_hermes_home() / "sessions" / "saved"
         try:
             saved_dir.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
+        except OSError as e:
             print(t("cli.session.save_dir_failed", path=saved_dir, error=e))
             return
         if filename:
@@ -698,7 +698,7 @@ class CLISessionMixin:
             # out-of-place rotation (idempotent when no rotation happened).
             if self.session_id:
                 print(f"       {t('cli.session.save_resume_hint', session_id=self.session_id)}")
-        except Exception as e:
+        except Exception as e:  # health: allow BLE001 -- /save's user boundary (main's, moved here): any render/write failure is printed
             print(t("cli.session.save_failed", error=e))
 
     def _publish_truncated_history(self, truncated: list, *, invalidate_prompt: bool) -> None:

@@ -249,7 +249,8 @@ def _typed_stop_phrase_response(rid, text):
         from tools.voice_mode_transcript import is_voice_stop_phrase
         if not is_voice_stop_phrase(text):
             return None
-    except Exception:
+    except Exception:  # an unreadable voice config never swallows the message: it reaches the agent
+        logger.debug("typed stop-phrase check failed; submitting the text", exc_info=True)
         return None
     _end_voice_chat(stop_loop=True, stop_tts=True)
     _voice_emit("voice.transcript", {"stop_phrase": True, "typed": True})
