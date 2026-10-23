@@ -487,6 +487,70 @@ class TestClassifyApiError:
         result = classify_api_error(e)
         assert result.reason == FailoverReason.overloaded
 
+    def test_500_model_load_failure_falls_back_not_retries(self):
+        """Local inference servers (llama.cpp llama-server, LM Studio) report a
+        server-side model-load failure as HTTP 500 with llama-server's
+        "model name=<slug> failed to load" shape. The weights never entered the
+        server's memory, so blind same-model retry replays a deterministic
+        failure until the retry budget drains; the turn must fall back to a
+        configured fallback model instead. (#102044)"""
+        e = MockAPIError(
+            "HTTP 500: model name=LFM2.5-2.6B-DSpark-Q8_0 failed to load",
+            status_code=500,
+        )
+        result = classify_api_error(e, provider="custom", model="LFM2.5-2.6B-DSpark-Q8_0")
+        assert result.reason == FailoverReason.model_not_found
+        assert result.retryable is False
+        assert result.should_fallback is True
+
+    def test_500_model_load_failure_other_word_orders(self):
+        """Other OpenAI-compatible local backends word the same condition
+        differently; every observed order must land on model_not_found."""
+        for msg in (
+            "failed to load model /path/to/LFM2.5.gguf",
+            "unable to load model: file not found",
+            "error loading model weights",
+            "model load failed",
+        ):
+            e = MockAPIError(msg, status_code=500)
+            result = classify_api_error(e, provider="custom")
+            assert result.reason == FailoverReason.model_not_found, msg
+            assert result.retryable is False, msg
+
+    def test_502_model_load_failure_falls_back(self):
+        e = MockAPIError("Bad Gateway: model failed to load", status_code=502)
+        result = classify_api_error(e, provider="custom")
+        assert result.reason == FailoverReason.model_not_found
+        assert result.retryable is False
+        assert result.should_fallback is True
+
+    def test_500_oom_during_model_load_still_backs_off(self):
+        """Memory-ceiling wording keeps #52261's route: OOM during a load can
+        clear on its own, so backoff (overloaded) precedes the load-failure
+        fallback even when the sentence also says 'failed to load'."""
+        e = MockAPIError("model failed to load: out of memory", status_code=500)
+        result = classify_api_error(e, provider="custom")
+        assert result.reason == FailoverReason.overloaded
+        assert result.retryable is True
+
+    def test_statusless_model_load_failure_falls_back(self):
+        """Some local backends raise a bare status-less ``APIError``; the
+        status-less message path gets the same treatment. (#102044)"""
+        e = MockAPIError("APIError: model failed to load")  # no status_code
+        result = classify_api_error(e, provider="custom")
+        assert result.reason == FailoverReason.model_not_found
+        assert result.retryable is False
+        assert result.should_fallback is True
+
+    def test_unrelated_failed_to_load_keeps_server_error(self):
+        """'failed to load' without model-load context (e.g. a cache/config
+        message relayed by the server) must keep the transient server_error
+        route — the pattern needs the model anchor."""
+        e = MockAPIError("helper failed to load the response cache", status_code=500)
+        result = classify_api_error(e, provider="custom")
+        assert result.reason == FailoverReason.server_error
+        assert result.retryable is True
+
 
     def test_408_request_timeout_is_retryable_timeout(self):
         """HTTP 408 Request Timeout is a transient timing failure the server

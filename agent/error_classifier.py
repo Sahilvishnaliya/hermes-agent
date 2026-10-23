@@ -280,6 +280,22 @@ _MODEL_NOT_FOUND_PATTERNS = (
     "is no longer free",
 )
 
+# Server-side model-load failures from local inference servers (llama.cpp
+# llama-server, LM Studio): the weights never entered server memory, so a
+# same-model retry replays a deterministic failure until the retry budget
+# drains ("HTTP 500: model name=<slug> failed to load"). Both word orders:
+# llama-server puts the slug between "model" and the verb, other backends
+# write "failed to load the model" / "unable to load the model". A regex,
+# not a substring tuple — the bare phrase "failed to load" over-matches
+# unrelated server messages ("failed to load the response cache"). (#102044)
+_MODEL_LOAD_FAILURE_RE = re.compile(
+    r"model\b.{0,64}?\bfailed to load\b"
+    r"|failed to load (?:the )?model\b"
+    r"|unable to load (?:the )?model\b"
+    r"|error loading (?:the )?model\b"
+    r"|model load failed"
+)
+
 # Qwen/vLLM chat-template "No user query found". Shared by the invalid-body
 # table (→ format_error) and the llama.cpp grammar guard so they cannot drift.
 _NO_USER_QUERY_SIGNAL = "no user query found"
@@ -946,6 +962,11 @@ def _by_message(c: _Ctx) -> Optional[Verdict]:
     head = _first_match(c.msg, _MESSAGE_HEAD_RULES)
     if head is not None:
         return head
+    # Local backends raise a bare status-less ``APIError`` for a model-load
+    # failure; same non-retryable + fallback treatment as the HTTP 500
+    # shape (#102044).
+    if _MODEL_LOAD_FAILURE_RE.search(c.msg):
+        return _V_MODEL_NOT_FOUND
     usage_limit = any(p in c.msg for p in _USAGE_LIMIT_PATTERNS)
     return _classify_402(c.msg, dict) if usage_limit else _first_match(c.msg, _MESSAGE_TAIL_RULES)
 
@@ -1124,7 +1145,15 @@ def _status_5xx(c: _Ctx) -> Verdict:
     validation = any(p in c.msg for p in _REQUEST_VALIDATION_PATTERNS) or c.code in _5XX_VALIDATION_CODES
     if validation and not _is_server_injected_param_rejection(c.msg, c.provider_slug):
         return _V_FORMAT_ERROR
-    return _first_match(c.msg, _OVERFLOW_AS_5XX_RULES) or _V_SERVER_ERROR
+    # Overflow/memory-ceiling wording keeps its existing routes first: OOM
+    # during a model load can clear on its own, so it backs off (#52261)
+    # rather than failing over. A bare load failure is deterministic —
+    # fall back to a configured fallback model instead of draining the
+    # retry budget on the same model (#102044).
+    overflow = _first_match(c.msg, _OVERFLOW_AS_5XX_RULES)
+    if overflow is not None:
+        return overflow
+    return _V_MODEL_NOT_FOUND if _MODEL_LOAD_FAILURE_RE.search(c.msg) else _V_SERVER_ERROR
 
 
 def _classify_402(error_msg: str, result_fn: Callable[..., Any]) -> Any:
