@@ -587,7 +587,13 @@ _TOKEN_BODY_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvw
 
 
 def _compile_prefix_matcher(patterns: list) -> re.Pattern[str]:
-    return re.compile(r"(?<![A-Za-z0-9_-])(" + "|".join(patterns) + r")(?![A-Za-z0-9_-])")
+    # ``_`` is NOT in either delimiter class. In the trailing class it made every pattern whose body
+    # is alphanumerics-only (``ghp_``, ``hf_``, ``npm_`` ...) fail when an underscore followed the
+    # token: the lookahead failed, the body backtracked one char at a time, and each shorter match
+    # failed the same lookahead, so the whole token fell through in cleartext (#142852). The same
+    # delimiter made ``x_<token>`` leak from the other side. A ``_`` that belongs to the token's own
+    # body is still consumed by the greedy body.
+    return re.compile(r"(?<![A-Za-z0-9])(" + "|".join(patterns) + r")(?![A-Za-z0-9])")
 
 
 _PREFIX_RE = _compile_prefix_matcher(_PREFIX_PATTERNS)

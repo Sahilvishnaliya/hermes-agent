@@ -139,6 +139,40 @@ class TestKnownPrefixes:
 
 
 
+class TestUnderscoreDelimitedTokens:
+    """A token an underscore butts against must still mask - #142852.
+
+    ``_`` sat in both delimiter classes while many pattern bodies are alphanumerics-only, so a
+    ``_SUFFIX`` made the trailing lookahead fail, the body backtracked, and the token fell through
+    in cleartext; a leading ``x_`` did the same from the other side.
+    """
+
+    BODIES = {
+        "ghp_": "A" * 36,
+        "gho_": "B" * 36,
+        "hf_": "C" * 30,
+        "npm_": "D" * 36,
+    }
+
+    def test_a_trailing_underscore_suffix_does_not_keep_the_token_clear(self):
+        tok = "ghp_" + "A" * 36
+        result = redact_sensitive_text(f"value {tok}_SUFFIX here", force=True)
+        assert tok not in result
+
+    def test_a_leading_underscore_does_not_keep_the_token_clear(self):
+        tok = "ghp_" + "A" * 36
+        assert tok not in redact_sensitive_text(f"x_{tok}", force=True)
+
+    def test_both_sides_delimited_by_underscores(self):
+        tok = "ghp_" + "A" * 36
+        assert tok not in redact_sensitive_text(f"x_{tok}_SUFFIX", force=True)
+
+    @pytest.mark.parametrize("prefix", sorted(BODIES))
+    def test_every_family_masks_with_a_trailing_suffix(self, prefix):
+        tok = prefix + self.BODIES[prefix]
+        assert tok not in redact_sensitive_text(f"{tok}_suffix", force=True)
+
+
 class TestEnvAssignments:
     def test_export_api_key(self):
         text = "export OPENAI_API_KEY=sk-proj-abc123def456ghi789jkl012"
