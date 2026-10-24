@@ -86,6 +86,32 @@ def test_uv_python_uninstall_of_other_version_is_allowed(fake_runtime):
     assert rsp.command_deletes_runtime("uv python uninstall 3.9") is None
 
 
+def test_cd_then_a_relative_delete_still_finds_the_venv(fake_runtime):
+    # The terminal tool routinely runs ``cd <dir>; <cmd>``: the delete runs from that directory,
+    # not from this process's cwd, so a relative target must resolve there (#143691, false negative).
+    parent = os.path.dirname(fake_runtime["venv"])
+    assert rsp.command_deletes_runtime(f'cd "{parent}" && rm -rf venv') is not None
+
+
+def test_cd_elsewhere_makes_a_dot_delete_pass(fake_runtime, tmp_path, monkeypatch):
+    # With the process cwd inside the install, ``.`` used to resolve there and read as an
+    # ancestor of the venv, hard-blocking a plain __pycache__ cleanup (#143691, false positive).
+    monkeypatch.chdir(os.path.dirname(fake_runtime["venv"]))
+    project = tmp_path / "projects" / "x"
+    project.mkdir(parents=True)
+    assert rsp.command_deletes_runtime(
+        f'cd "{project}" && find . -name __pycache__ -prune -exec rm -r {{}} +') is None
+
+
+def test_a_cd_to_an_absolute_path_of_the_venv_is_detected(fake_runtime):
+    assert rsp.command_deletes_runtime(f'cd "{fake_runtime["venv"]}" && rm -rf .') is not None
+
+
+def test_an_unfollowable_cd_falls_back_without_crashing(fake_runtime):
+    # ``cd -`` has no directory to resolve against: fall back to the process cwd, never raise.
+    assert rsp.command_deletes_runtime(f'cd - && rm -rf "{fake_runtime["venv"]}"') is not None
+
+
 def test_find_delete_over_own_venv_is_detected(fake_runtime):
     # Both are deletes under the protected root: an unfiltered -delete removes
     # the interpreter itself, and a filtered one still deletes protected files.

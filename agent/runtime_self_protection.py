@@ -53,6 +53,10 @@ _DELETING_COMMANDS = frozenset({
     "rm", "rmdir", "rd", "del", "erase", "remove-item", "ri",
 })
 
+# A directory change decides where the FOLLOWING segments run, so a relative delete target
+# resolves against it (the terminal tool routinely runs ``cd <dir>; <cmd>``).
+_CHDIR_COMMANDS = frozenset({"cd", "pushd", "chdir", "set-location", "sl"})
+
 # `find <roots...> -delete` (or `-exec rm ...`) deletes its search roots.
 _FIND_DELETE_RE = re.compile(r"(?:^|\s)-(?:delete|exec\s+rm\b)", re.IGNORECASE)
 
@@ -64,13 +68,17 @@ _UV_INSTALL_DIR_RE = re.compile(
 _WIN_DRIVE_FROM_POSIX_RE = re.compile(r"^/(?:(mnt)/)?([a-zA-Z])/(.+)$")
 
 
-def _normalize_path(raw: str) -> str:
+def _normalize_path(raw: str, base: str | None = None) -> str:
     """One canonical form for both shell spellings and runtime paths.
 
     Expands ``~``/``$HOME``, maps git-bash (``/c/...``) and WSL (``/mnt/c/...``)
     drive forms to native Windows paths, then ``realpath``s so symlink mirrors
     (macOS ``/private``) and relocated installs compare equal. Missing tails are
     fine: POSIX ``realpath`` resolves the existing prefix lexically.
+
+    ``base`` is the directory the shell will run the delete from: a relative target resolves
+    against it, never against this process's cwd (which is what made ``cd X && rm -rf venv``
+    delete a live venv that the check could not see).
     """
     path = str(raw or "").strip()
     if not path:
@@ -84,6 +92,8 @@ def _normalize_path(raw: str) -> str:
             path = os.path.expanduser(path)
         except Exception:
             pass
+    if base and not os.path.isabs(path) and not (os.name == "nt" and path[:1] == "\\"):
+        path = os.path.join(base, path)
     if os.name == "nt":
         m = _WIN_DRIVE_FROM_POSIX_RE.match(path)
         if m:
@@ -93,6 +103,22 @@ def _normalize_path(raw: str) -> str:
         return os.path.normcase(os.path.realpath(os.path.normpath(path)))
     except Exception:
         return os.path.normcase(os.path.normpath(path))
+
+
+def _chdir_target(words: list[str], cwd: str | None) -> str | None:
+    """Directory a ``cd``/``pushd`` segment moves to, or None when it cannot be followed.
+
+    None means "unknown": callers then fall back to this process's cwd, which is what every
+    segment resolved against before. ``cd -`` is unknown; a bare ``cd`` is the home directory.
+    """
+    target = next((word for word in words[1:] if not word.startswith("-")), "")
+    if not target:
+        return os.path.expanduser("~")
+    if target == "-":
+        return None
+    if os.path.isabs(target):
+        return target
+    return os.path.join(cwd, target) if cwd else None
 
 
 def _pyvenv_home(prefix: str) -> str:
@@ -163,16 +189,17 @@ def split_entry(path: str) -> tuple[str, str]:
     return parent, leaf
 
 
-def is_protected_path(path: str, *, follow: bool = True) -> Optional[str]:
+def is_protected_path(path: str, *, follow: bool = True, base: str | None = None) -> Optional[str]:
     """Description of the protected runtime path ``path`` touches, else ``None``.
 
     ``follow=False`` keeps the final component unresolved (the entry itself, for
-    ops that unlink/rename a symlink rather than its target)."""
+    ops that unlink/rename a symlink rather than its target). ``base`` is the
+    directory the command runs in, for a relative ``path``."""
     if follow:
-        resolved = _normalize_path(path)
+        resolved = _normalize_path(path, base)
     else:
         parent, leaf = split_entry(path)
-        resolved = _normalize_path(parent or ".")
+        resolved = _normalize_path(parent or ".", base)
         resolved = resolved and os.path.normcase(os.path.join(resolved, leaf))
     if not resolved:
         return None
@@ -257,11 +284,16 @@ def command_deletes_runtime(command: str) -> Optional[str]:
     if not protected:
         return None
 
+    cwd: Optional[str] = os.getcwd()
     for segment in _SEGMENT_SPLIT_RE.split(command):
         words = _strip_prefixes(_split_words(segment))
         if not words:
             continue
         name = os.path.basename(words[0]).lower()
+
+        if name in _CHDIR_COMMANDS:
+            cwd = _chdir_target(words, cwd)
+            continue
 
         if name == "uv":
             target = _uv_uninstall_target(words)
@@ -272,7 +304,7 @@ def command_deletes_runtime(command: str) -> Optional[str]:
         if name == "find" and _FIND_DELETE_RE.search(segment):
             for word in words[1:]:
                 if not word.startswith("-"):
-                    hit = is_protected_path(word)
+                    hit = is_protected_path(word, base=cwd)
                     if hit:
                         return hit
             continue
@@ -283,7 +315,7 @@ def command_deletes_runtime(command: str) -> Optional[str]:
         for word in words[1:]:
             if word.startswith("-"):
                 continue
-            hit = is_protected_path(word)
+            hit = is_protected_path(word, base=cwd)
             if hit:
                 return hit
 
