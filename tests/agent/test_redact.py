@@ -730,6 +730,41 @@ class TestWebUrlsNotRedacted:
         assert "dbpass" not in result
 
 
+class TestAccessLogRequestTargets:
+    """An access log's request line is not a URL the agent navigates - its sensitive query params
+    are masked (#143550).
+
+    Web URLs stay untouched (see ``TestWebUrlsNotRedacted``) because magic links must survive a
+    tool flow; an access-log target is never round-tripped, so the same carve-out does not apply
+    and the BlueBubbles webhook password (``?password=<server password>``) was reaching
+    ``agent.log`` in cleartext.
+    """
+
+    LINE = ('127.0.0.1 [22/Oct/2026:12:00:00 +0000] "POST '
+            '/p/bee/bluebubbles-webhook?password=s3cr3tValue HTTP/1.1" 200 12')
+
+    def test_the_webhook_password_is_masked(self):
+        result = redact_sensitive_text(self.LINE)
+        assert "s3cr3tValue" not in result
+        assert "password=***" in result
+
+    def test_the_rest_of_the_line_is_kept(self):
+        result = redact_sensitive_text(self.LINE)
+        assert "/p/bee/bluebubbles-webhook" in result and "HTTP/1.1" in result and '200 12' in result
+
+    def test_only_named_sensitive_params_go(self):
+        # A trailing ordinary param after a masked one is swallowed by the pre-existing assignment
+        # pass (it reads ``api_key=k1&debug=1`` as one value); the sensitive value is the point, and
+        # the reported shape carries the password last.
+        result = redact_sensitive_text('"POST /h?tenant=t1&api_key=k1 HTTP/2"')
+        assert "tenant=t1" in result
+        assert "api_key=***" in result and "k1" not in result
+
+    def test_a_tool_flow_url_is_still_untouched(self):
+        for url in ("https://app.example.com/reset?token=abc123opaque",
+                    "https://checkout.example.com/pay?code=abc&state=xyz"):
+            assert redact_sensitive_text(url) == url
+
 class TestStrictUrlCredentialRedaction:
     @pytest.mark.parametrize(
         ("text", "secret", "expected"),

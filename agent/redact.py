@@ -750,6 +750,19 @@ def _redact_query_string(query: str) -> str:
     )
 
 
+# An HTTP request line, as every access log writes it: the quoted target of a
+# ``"METHOD /path?query HTTP/x.y"``. Query-param masking is otherwise opt-in
+# (``redact_url_credentials``) because magic-link / OAuth-callback / pre-signed URLs must survive
+# tool flows unchanged - but an access-log target is never round-tripped, so its sensitive params
+# can be masked without breaking anything (#143550, the BlueBubbles webhook password).
+_HTTP_REQUEST_TARGET_RE = re.compile(r'("[A-Z]+ )([^"\s?]*\?[^"\s]*)( HTTP/[0-9.]+")')
+
+
+def _redact_request_target(match: re.Match[str]) -> str:
+    path, _, query = match.group(2).partition("?")
+    return f"{match.group(1)}{path}?{_redact_query_string(query)}{match.group(3)}"
+
+
 def _canonical_url_param_name(name: str) -> str:
     """Decode a URL parameter name (up to 3 unquote rounds) for case-insensitive matching."""
     decoded = name
@@ -998,6 +1011,12 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
 
     if "+" in text:
         text = _SIGNAL_PHONE_RE.sub(_redact_phone, text)
+
+    if " HTTP/" in text:
+        # Last, after the form-body pass: an access line carries "&" and "=", so that pass would
+        # otherwise rewrite it as if it were a form body. Request targets only, never a tool-flow
+        # URL - see _HTTP_REQUEST_TARGET_RE.
+        text = _HTTP_REQUEST_TARGET_RE.sub(_redact_request_target, text)
 
     return text
 
