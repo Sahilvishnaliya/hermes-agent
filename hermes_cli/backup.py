@@ -516,6 +516,8 @@ def _write_zip_entries(
     for i, (abs_path, rel_path) in enumerate(files_to_add, 1):
         try:
             if abs_path.suffix == ".db":
+                if not abs_path.exists():
+                    continue
                 size = _zip_sqlite_snapshot(zf, abs_path, rel_path, out_path)
                 if size is None:
                     on_db_failure(rel_path)
@@ -525,6 +527,11 @@ def _write_zip_entries(
                 _write_zip_file(zf, abs_path, str(rel_path))
                 if track_bytes:
                     total_bytes += abs_path.stat().st_size
+        except FileNotFoundError:
+            # Vanished between the scan and this read (Hermes deletes its own short-lived
+            # process/cron files while the archive runs). The file is not missing from the
+            # archive — it no longer exists — so the run is not incomplete (#144066).
+            continue
         except (PermissionError, OSError, ValueError) as exc:
             on_error(rel_path, exc)
             continue
@@ -647,6 +654,8 @@ def _run_backup_locked(args, hermes_root: Path) -> bool:
             try:
                 _write_zip_file(zf, abs_path, arcname)
                 total_bytes += abs_path.stat().st_size
+            except FileNotFoundError:
+                continue  # vanished since the scan; see _write_zip_entries
             except (PermissionError, OSError, ValueError) as exc:
                 errors.append(f"{arcname}: {exc}")
     elapsed = time.monotonic() - t0
@@ -1217,10 +1226,10 @@ def create_pre_update_backup(
 
 def create_pre_migration_backup(
     hermes_home: Optional[Path] = None, keep: int = _PRE_MIGRATION_DEFAULT_KEEP) -> Optional[Path]:
-    """Full zip backup to ``backups/pre-migration-<timestamp>.zip`` before ``hermes claw migrate``
-    (same dir as update backups so listings/``hermes import`` find it); ``None`` if nothing was
-    found, the write failed, or it was incomplete (salvage kept as ``*.incomplete.zip``). Never
-    raises."""
+    """Full zip backup to ``backups/pre-migration-<timestamp>.zip`` before a plugin's agent import
+    (``hermes import-agent openclaw``), so its name and signature are API; same dir as update backups
+    so ``hermes import`` finds it. ``None`` if nothing was found, the write failed, or it was
+    incomplete (salvage kept as ``*.incomplete.zip``). Never raises."""
     return _create_prefixed_full_backup(
         hermes_home, _PRE_MIGRATION_PREFIX, max(keep, 0), "pre-migration", "pre-migration backup")
 
@@ -1592,34 +1601,33 @@ def _restore_snapshot_entry(rel: str, src: Path, dst: Path) -> bool:
         return False
 
 
-def _restore_quick_snapshot_exclusive(snapshot_id: str, home: Path) -> bool:
-    """Restore state from a quick snapshot while ``home`` is reserved."""
-    from gateway.runtime_ownership import exclusive_maintenance
-    root = _quick_snapshot_root(home)
-
+def quick_snapshot_dir(snapshot_id: str, hermes_home: Optional[Path] = None) -> Optional[Path]:
+    """The directory of a restorable quick snapshot, or None for an invalid or missing id."""
+    root = _quick_snapshot_root(hermes_home)
     # Security: reject snapshot_id values that contain path separators or
     # traversal sequences so that `root / snapshot_id` stays inside root.
     if not snapshot_id or "/" in snapshot_id or "\\" in snapshot_id or snapshot_id in (".", ".."):
         logger.error("Invalid snapshot_id: %s", snapshot_id)
-        return False
-
+        return None
     snap_dir = root / snapshot_id
-
     # Confirm the resolved path is still inside root (handles symlinks etc.)
     try:
         snap_dir.resolve().relative_to(root.resolve())
     except ValueError:
         logger.error("Snapshot path traversal blocked for id: %s", snapshot_id)
-        return False
+        return None
+    if not snap_dir.is_dir() or not (snap_dir / "manifest.json").exists():
+        return None
+    return snap_dir
 
-    if not snap_dir.is_dir():
-        return False
 
-    manifest_path = snap_dir / "manifest.json"
-    if not manifest_path.exists():
+def _restore_quick_snapshot_exclusive(snapshot_id: str, home: Path) -> bool:
+    """Restore state from a quick snapshot while ``home`` is reserved."""
+    from gateway.runtime_ownership import exclusive_maintenance
+    snap_dir = quick_snapshot_dir(snapshot_id, home)
+    if snap_dir is None:
         return False
-
-    with open(manifest_path, encoding="utf-8-sig") as f:
+    with open(snap_dir / "manifest.json", encoding="utf-8-sig") as f:
         meta = json.load(f)
 
     snap_res, home_res = snap_dir.resolve(), home.resolve()
