@@ -2,6 +2,8 @@
 policies and delivery preferences, loaded from config.yaml / gateway.json / env.
 """
 
+from __future__ import annotations
+
 import contextlib
 import logging
 import math
